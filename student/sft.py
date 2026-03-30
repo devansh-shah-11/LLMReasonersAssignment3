@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 from transformers import PreTrainedTokenizerBase
 
 
@@ -7,13 +8,23 @@ def tokenize_prompt_and_output(
     output_strs: list[str],
     tokenizer: PreTrainedTokenizerBase,
 ) -> dict[str, torch.Tensor]:
-    """Tokenize prompts and outputs separately, concatenate, and build response_mask."""
-    
+    """Tokenize prompts and outputs separately, concatenate, and build response_mask.
+
+    Args:
+        prompt_strs: list[str] of prompt strings.
+        output_strs: list[str] of output/response strings.
+        tokenizer: HuggingFace tokenizer.
+
+    Returns:
+        dict with:
+            "input_ids":      (batch_size, max_len - 1) — concat tokens, last token removed.
+            "labels":         (batch_size, max_len - 1) — input_ids shifted left (first token removed).
+            "response_mask":  (batch_size, max_len - 1) — 1 for response tokens in labels, 0 otherwise.
+    """
     prompt_ids_list = [tokenizer.encode(p, add_special_tokens=False) for p in prompt_strs]
     output_ids_list = [tokenizer.encode(o, add_special_tokens=False) for o in output_strs]
 
     batch_size = len(prompt_strs)
-    # Full sequence: prompt + output tokens
     full_ids_list = [
         prompt_ids + output_ids
         for prompt_ids, output_ids in zip(prompt_ids_list, output_ids_list)
@@ -34,9 +45,6 @@ def tokenize_prompt_and_output(
         prompt_len = len(prompt_ids)
         response_mask_full[i, prompt_len:seq_len] = 1
 
-    # input_ids: all tokens except the last  → (batch, max_full_len - 1)
-    # labels:    all tokens except the first → (batch, max_full_len - 1)
-    # response_mask: marks response tokens in labels position
     input_ids     = padded[:, :-1]
     labels        = padded[:, 1:]
     response_mask = response_mask_full[:, 1:]
@@ -46,3 +54,112 @@ def tokenize_prompt_and_output(
         "labels":        labels,
         "response_mask": response_mask,
     }
+
+
+def compute_entropy(logits: torch.Tensor) -> torch.Tensor:
+    """Compute per-token entropy of next-token predictions.
+
+    Args:
+        logits: (batch_size, sequence_length, vocab_size) unnormalized logits.
+
+    Returns:
+        (batch_size, sequence_length) entropy for each position.
+    """
+    # Numerically stable: log_softmax via logsumexp
+    log_probs = logits - torch.logsumexp(logits, dim=-1, keepdim=True)
+    probs = torch.exp(log_probs)
+    # H = -sum(p * log_p)
+    entropy = -(probs * log_probs).sum(dim=-1)
+    return entropy
+
+
+def get_response_log_probs(
+    model,
+    input_ids: torch.Tensor,
+    labels: torch.Tensor,
+    return_token_entropy: bool = False,
+) -> dict[str, torch.Tensor]:
+    """Get per-token conditional log-probabilities from a causal LM.
+
+    Args:
+        model: HuggingFace causal LM.
+        input_ids: (batch_size, sequence_length) input token ids.
+        labels: (batch_size, sequence_length) label token ids (shifted input_ids).
+        return_token_entropy: if True, also return per-token entropy.
+
+    Returns:
+        dict with:
+            "log_probs": (batch_size, sequence_length)
+            "token_entropy": (batch_size, sequence_length) — only if return_token_entropy=True
+    """
+    logits = model(input_ids).logits  # (B, T, V)
+
+    # log_probs for each position: log p(labels[t] | input_ids[:t])
+    log_probs_all = F.log_softmax(logits, dim=-1)  # (B, T, V)
+    # Gather the log-prob of the actual label at each position
+    log_probs = log_probs_all.gather(
+        dim=-1, index=labels.unsqueeze(-1)
+    ).squeeze(-1)  # (B, T)
+
+    result = {"log_probs": log_probs}
+
+    if return_token_entropy:
+        result["token_entropy"] = compute_entropy(logits)
+
+    return result
+
+
+def masked_normalize(
+    tensor: torch.Tensor,
+    mask: torch.Tensor,
+    normalize_constant: float = 1.0,
+    dim: int | None = None,
+) -> torch.Tensor:
+    """Sum masked tensor elements along a dimension and divide by normalize_constant.
+
+    Args:
+        tensor: tensor to sum.
+        mask: same shape as tensor; 1 for included positions, 0 otherwise.
+        normalize_constant: divisor for normalization.
+        dim: dimension to sum along; if None, sum over all dimensions.
+
+    Returns:
+        Normalized sum (masked elements contribute 0).
+    """
+    masked = tensor * mask
+    if dim is None:
+        return masked.sum() / normalize_constant
+    return masked.sum(dim=dim) / normalize_constant
+
+
+def sft_microbatch_train_step(
+    policy_log_probs: torch.Tensor,
+    response_mask: torch.Tensor,
+    gradient_accumulation_steps: int,
+    normalize_constant: float = 1.0,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """One SFT microbatch forward+backward pass.
+
+    Args:
+        policy_log_probs: (batch_size, sequence_length) per-token log-probs.
+        response_mask: (batch_size, sequence_length) 1 for response tokens.
+        gradient_accumulation_steps: number of microbatches per optimizer step.
+        normalize_constant: divisor for the masked sum (default 1.0).
+
+    Returns:
+        (loss, metadata) where loss is the scalar microbatch loss (already
+        divided by gradient_accumulation_steps and backpropagated).
+    """
+    # NLL loss: negative sum of log-probs over response tokens, normalized
+    loss = -masked_normalize(
+        policy_log_probs,
+        response_mask,
+        normalize_constant=normalize_constant,
+        dim=None,
+    )
+
+    # Scale for gradient accumulation
+    scaled_loss = loss / gradient_accumulation_steps
+    scaled_loss.backward()
+
+    return scaled_loss, {}
