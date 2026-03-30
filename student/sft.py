@@ -150,13 +150,14 @@ def sft_microbatch_train_step(
         (loss, metadata) where loss is the scalar microbatch loss (already
         divided by gradient_accumulation_steps and backpropagated).
     """
-    # NLL loss: negative sum of log-probs over response tokens, normalized
-    loss = -masked_normalize(
+    # Per-sequence masked sum (divided by normalize_constant), then mean over batch
+    per_seq = masked_normalize(
         policy_log_probs,
         response_mask,
         normalize_constant=normalize_constant,
-        dim=None,
+        dim=1,
     )
+    loss = -per_seq.mean()
 
     # Scale for gradient accumulation
     scaled_loss = loss / gradient_accumulation_steps
