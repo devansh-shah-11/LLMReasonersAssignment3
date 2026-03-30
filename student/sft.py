@@ -1,5 +1,3 @@
-"""SFT helper methods."""
-
 import torch
 from transformers import PreTrainedTokenizerBase
 
@@ -9,27 +7,10 @@ def tokenize_prompt_and_output(
     output_strs: list[str],
     tokenizer: PreTrainedTokenizerBase,
 ) -> dict[str, torch.Tensor]:
-    """Tokenize prompts and outputs separately, concatenate, and build response_mask.
-
-    Args:
-        prompt_strs: list[str] of prompt strings.
-        output_strs: list[str] of output/response strings.
-        tokenizer: HuggingFace tokenizer.
-
-    Returns:
-        dict with:
-            "input_ids":      (batch_size, max_len - 1) — concat tokens, last token removed.
-            "labels":         (batch_size, max_len - 1) — input_ids shifted left (first token removed).
-            "response_mask":  (batch_size, max_len - 1) — 1 for response tokens in labels, 0 otherwise.
-    """
-    # Tokenize prompts and outputs WITHOUT adding special tokens so we can
-    # concatenate them cleanly. add_special_tokens=False avoids duplicate BOS.
-    prompt_ids_list = [
-        tokenizer.encode(p, add_special_tokens=False) for p in prompt_strs
-    ]
-    output_ids_list = [
-        tokenizer.encode(o, add_special_tokens=False) for o in output_strs
-    ]
+    """Tokenize prompts and outputs separately, concatenate, and build response_mask."""
+    
+    prompt_ids_list = [tokenizer.encode(p, add_special_tokens=False) for p in prompt_strs]
+    output_ids_list = [tokenizer.encode(o, add_special_tokens=False) for o in output_strs]
 
     batch_size = len(prompt_strs)
     # Full sequence: prompt + output tokens
@@ -40,7 +21,6 @@ def tokenize_prompt_and_output(
 
     max_full_len = max(len(ids) for ids in full_ids_list)
 
-    # Pad to max_full_len (right-pad)
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
 
     padded = torch.full((batch_size, max_full_len), pad_id, dtype=torch.long)
@@ -50,9 +30,7 @@ def tokenize_prompt_and_output(
         zip(full_ids_list, prompt_ids_list, output_ids_list)
     ):
         seq_len = len(full_ids)
-        # Left-align: put sequence at the start (right padding)
         padded[i, :seq_len] = torch.tensor(full_ids, dtype=torch.long)
-        # Mark response positions in the full sequence
         prompt_len = len(prompt_ids)
         response_mask_full[i, prompt_len:seq_len] = 1
 
