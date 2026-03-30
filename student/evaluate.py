@@ -104,8 +104,8 @@ def evaluate(responses, prompts, ground_truths, dataset_name="dataset", max_log_
 
         entry = {
             "index": i,
-            "prompt_tail": prompts[i][-300:],
-            "model_output": text[:1500],
+            "prompt": prompts[i],
+            "model_output": text,
             "ground_truth": gt,
             "format_reward": fmt,
             "answer_reward": ans,
