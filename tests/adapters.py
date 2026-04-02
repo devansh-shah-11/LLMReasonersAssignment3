@@ -31,7 +31,7 @@ def run_tokenize_prompt_and_output(
             "response_mask": torch.Tensor of shape (batch_size, max(prompt_and_output_lens) - 1):
                 a mask on the response tokens in `labels`.
     """
-    from student.sft import tokenize_prompt_and_output
+    from student.sft_helper import tokenize_prompt_and_output
     return tokenize_prompt_and_output(prompt_strs, output_strs, tokenizer)
 
 
@@ -83,7 +83,7 @@ def run_compute_group_normalized_rewards(
 
 def run_compute_entropy(logits: torch.Tensor) -> torch.Tensor:
     """Get the entropy of the logits (i.e., entropy of the final dimension)."""
-    from student.sft import compute_entropy
+    from student.sft_helper import compute_entropy
     return compute_entropy(logits)
 
 
@@ -116,7 +116,7 @@ def run_get_response_log_probs(
                 we have not masked out the token indices corresponding to the prompt
                 or padding; that is done in the train loop.
     """
-    from student.sft import get_response_log_probs
+    from student.sft_helper import get_response_log_probs
     return get_response_log_probs(model, input_ids, labels, return_token_entropy)
 
 
@@ -206,7 +206,7 @@ def run_sft_microbatch_train_step(
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Compute the policy gradient loss and backprop its gradients for a microbatch.
     """
-    from student.sft import sft_microbatch_train_step
+    from student.sft_helper import sft_microbatch_train_step
     return sft_microbatch_train_step(
         policy_log_probs, response_mask, gradient_accumulation_steps, normalize_constant
     )
@@ -273,7 +273,7 @@ def run_masked_normalize(
         torch.Tensor, the normalized sum, where masked elements
             (mask=0) don't contribute to the sum.
     """
-    from student.sft import masked_normalize
+    from student.sft_helper import masked_normalize
     return masked_normalize(tensor, mask, normalize_constant=normalize_constant, dim=dim)
 
 
