@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=sft_trainer
 #SBATCH --account=csci_ga_3033_131-2026sp
-#SBATCH --partition=c12m85-a100-2
+#SBATCH --partition=c24m170-a100-2 
 #SBATCH --output=./logs/%j_%x.out
 #SBATCH --error=./logs/%j_%x.err
 #SBATCH --time=04:00:00
