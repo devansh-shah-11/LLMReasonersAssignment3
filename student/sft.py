@@ -58,14 +58,7 @@ def tokenize_prompt_and_output(
 
 
 def compute_entropy(logits: torch.Tensor) -> torch.Tensor:
-    """Compute per-token entropy of next-token predictions.
-
-    Args:
-        logits: (batch_size, sequence_length, vocab_size) unnormalized logits.
-
-    Returns:
-        (batch_size, sequence_length) entropy for each position.
-    """
+    """Compute per-token entropy of next-token predictions."""
     # Numerically stable: log_softmax via logsumexp
     log_probs = logits - torch.logsumexp(logits, dim=-1, keepdim=True)
     probs = torch.exp(log_probs)
@@ -80,27 +73,13 @@ def get_response_log_probs(
     labels: torch.Tensor,
     return_token_entropy: bool = False,
 ) -> dict[str, torch.Tensor]:
-    """Get per-token conditional log-probabilities from a causal LM.
-
-    Args:
-        model: HuggingFace causal LM.
-        input_ids: (batch_size, sequence_length) input token ids.
-        labels: (batch_size, sequence_length) label token ids (shifted input_ids).
-        return_token_entropy: if True, also return per-token entropy.
-
-    Returns:
-        dict with:
-            "log_probs": (batch_size, sequence_length)
-            "token_entropy": (batch_size, sequence_length) — only if return_token_entropy=True
-    """
+    """Get per-token conditional log-probabilities from a causal LM."""
     logits = model(input_ids).logits  # (B, T, V)
 
     # log_probs for each position: log p(labels[t] | input_ids[:t])
     log_probs_all = F.log_softmax(logits, dim=-1)  # (B, T, V)
     # Gather the log-prob of the actual label at each position
-    log_probs = log_probs_all.gather(
-        dim=-1, index=labels.unsqueeze(-1)
-    ).squeeze(-1)  # (B, T)
+    log_probs = log_probs_all.gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)  # (B, T)
 
     result = {"log_probs": log_probs}
 
@@ -116,17 +95,7 @@ def masked_normalize(
     normalize_constant: float = 1.0,
     dim: int | None = None,
 ) -> torch.Tensor:
-    """Sum masked tensor elements along a dimension and divide by normalize_constant.
-
-    Args:
-        tensor: tensor to sum.
-        mask: same shape as tensor; 1 for included positions, 0 otherwise.
-        normalize_constant: divisor for normalization.
-        dim: dimension to sum along; if None, sum over all dimensions.
-
-    Returns:
-        Normalized sum (masked elements contribute 0).
-    """
+    """Sum masked tensor elements along a dimension and divide by normalize_constant"""
     masked = tensor * mask
     if dim is None:
         return masked.sum() / normalize_constant
@@ -139,18 +108,7 @@ def sft_microbatch_train_step(
     gradient_accumulation_steps: int,
     normalize_constant: float = 1.0,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """One SFT microbatch forward+backward pass.
-
-    Args:
-        policy_log_probs: (batch_size, sequence_length) per-token log-probs.
-        response_mask: (batch_size, sequence_length) 1 for response tokens.
-        gradient_accumulation_steps: number of microbatches per optimizer step.
-        normalize_constant: divisor for the masked sum (default 1.0).
-
-    Returns:
-        (loss, metadata) where loss is the scalar microbatch loss (already
-        divided by gradient_accumulation_steps and backpropagated).
-    """
+    """One SFT microbatch forward+backward pass."""
     # Per-sequence masked sum (divided by normalize_constant), then mean over batch
     per_seq = masked_normalize(
         policy_log_probs,
