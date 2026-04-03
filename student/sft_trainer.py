@@ -304,6 +304,8 @@ def train_sft(
         torch_dtype=torch.bfloat16,
         device_map=device,
     )
+    # Enable gradient checkpointing to reduce memory usage
+    policy.gradient_checkpointing_enable()
     policy.train()
 
     # Setup optimizer
