@@ -136,8 +136,28 @@ class SFTDataset(Dataset):
 
     def __getitem__(self, idx):
         example = self.data[idx]
-        prompt = example.get("prompt", "")
-        output = example.get("output", "")
+        # Handle both formats: (1) prompt/output fields and (2) messages/ground_truth fields
+        if "prompt" in example and "output" in example:
+            prompt = example.get("prompt", "")
+            output = example.get("output", "")
+        elif "messages" in example:
+            # Extract prompt from system+user messages, output from assistant message
+            messages = example.get("messages", [])
+            prompt_parts = []
+            output = ""
+            for msg in messages:
+                role = msg.get("role", "")
+                content = msg.get("content", "")
+                if role in ["system", "user"]:
+                    prompt_parts.append(content)
+                elif role == "assistant":
+                    output = content
+            prompt = "\n".join(prompt_parts)
+        else:
+            # Fallback to empty if format is not recognized
+            prompt = ""
+            output = ""
+            print(f"Warning: Unrecognized format for example at index {idx}: {example}")
         return {"prompt": prompt, "output": output}
 
 
