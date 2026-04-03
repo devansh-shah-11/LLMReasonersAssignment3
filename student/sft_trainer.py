@@ -89,33 +89,22 @@ def load_data_from_path(data_path: str, max_samples: Optional[int] = None) -> li
     
     for file_path in file_paths:
         print(f"Loading data from {file_path}")
-        with open(file_path) as f:
-            content = f.read()
         
-        # Try to load as JSON array first (single JSON file with array)
         try:
-            data_list = json.loads(content)
-            if isinstance(data_list, list):
-                for example in data_list:
+            with open(file_path, encoding='utf-8') as f:
+                for line in f:
+                    if not line.strip():
+                        continue
                     if max_samples and len(data) >= max_samples:
                         break
-                    data.append(example)
-            else:
-                # Single JSON object, wrap in list
-                data.append(data_list)
-        except json.JSONDecodeError:
-            # Fall back to line-by-line JSON (JSONL format)
-            print(f"Warning: Could not parse {file_path} as JSON array, trying line-by-line JSONL format.")
-            for line in content.strip().split('\n'):
-                if not line.strip():
-                    continue
-                if max_samples and len(data) >= max_samples:
-                    break
-                try:
-                    example = json.loads(line.strip())
-                    data.append(example)
-                except json.JSONDecodeError as e:
-                    print(f"Warning: Could not parse line in {file_path}: {e}")
+                    try:
+                        example = json.loads(line.strip())
+                        data.append(example)
+                    except json.JSONDecodeError as e:
+                        print(f"Warning: Could not parse line in {file_path}: {e}")
+        except UnicodeDecodeError:
+            print(f"Warning: Skipping {file_path} - not a valid UTF-8 text file")
+            continue
         
         if max_samples and len(data) >= max_samples:
             break
