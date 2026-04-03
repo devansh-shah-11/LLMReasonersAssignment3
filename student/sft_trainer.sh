@@ -66,8 +66,8 @@ run_training () {
     cd /scratch/dns5508/LLMReasonersAssignment3
 
     python3 -m student.sft_trainer \
-      --train_data_path ${DATASET_DIR}/train \
-      --eval_data_path ${DATASET_DIR}/dev \
+      --train_data_path ${DATASET_DIR}/train/data.json \
+      --eval_data_path ${DATASET_DIR}/test/data.json \
       --output_dir ${MODEL_DIR} \
       --run_name ${RUN_NAME} \
       --num_epochs ${NUM_EPOCHS} \
