@@ -1,6 +1,7 @@
 import argparse
 import json
 import math
+import os
 import torch
 import torch.nn.functional as F
 import wandb
@@ -76,17 +77,28 @@ class SFTDataset(Dataset):
     ):
         """
         Args:
-            data_path: Path to JSONL file with data.
+            data_path: Path to JSONL file or directory containing JSONL files.
             tokenizer: HuggingFace tokenizer.
             max_samples: Maximum number of samples to load (None for all).
         """
         self.data = []
-        with open(data_path) as f:
-            for i, line in enumerate(f):
-                if max_samples and i >= max_samples:
-                    break
-                example = json.loads(line.strip())
-                self.data.append(example)
+        
+        # Handle both file and directory paths
+        if os.path.isdir(data_path):
+            jsonl_files = sorted([f for f in os.listdir(data_path) if f.endswith('.jsonl')])
+            file_paths = [os.path.join(data_path, f) for f in jsonl_files]
+        else:
+            file_paths = [data_path]
+        
+        for file_path in file_paths:
+            with open(file_path) as f:
+                for i, line in enumerate(f):
+                    if max_samples and len(self.data) >= max_samples:
+                        break
+                    example = json.loads(line.strip())
+                    self.data.append(example)
+            if max_samples and len(self.data) >= max_samples:
+                break
 
         self.tokenizer = tokenizer
 
