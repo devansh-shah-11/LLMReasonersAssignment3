@@ -281,7 +281,7 @@ def train_sft(
     print(f"Output directory: {output_dir}")
 
     if use_wandb:
-        wandb.init(project="sft-math", config=locals())
+        wandb.init(project="sft-math", name=run_name, config=locals())
         wandb.define_metric("train_step")
         wandb.define_metric("eval_step")
         wandb.define_metric("train/*", step_metric="train_step")
