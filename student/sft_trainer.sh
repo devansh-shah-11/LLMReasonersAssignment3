@@ -21,11 +21,34 @@ BATCH_SIZES=(16 32)
 
 NUM_EPOCHS=3
 
+# STATE TRACKING
+STATE_DIR="/scratch/dns5508/sft_sweep_state"
+mkdir -p $STATE_DIR
+
+COMPLETED_FILE="$STATE_DIR/completed_runs.txt"
+RESULTS_FILE="$STATE_DIR/results.csv"
+
+touch $COMPLETED_FILE
+
+# Initialize results file if not exists
+if [ ! -f "$RESULTS_FILE" ]; then
+    echo "run_name,size,batch_size,lr,status" > $RESULTS_FILE
+fi
+
+# ========================
+# RUN FUNCTION
+# ========================
 run_training () {
     local RUN_NAME=$1
     local MAX_SAMPLES=$2
     local BATCH_SIZE=$3
     local LEARNING_RATE=$4
+
+    # Skip if already completed
+    if grep -Fxq "$RUN_NAME" $COMPLETED_FILE; then
+        echo "⏭ Skipping $RUN_NAME (already completed)"
+        return
+    fi
 
     echo "=============================="
     echo "Starting: $RUN_NAME"
@@ -33,7 +56,7 @@ run_training () {
     echo "Batch: $BATCH_SIZE | LR: $LEARNING_RATE"
     echo "=============================="
 
-    singularity exec --bind /scratch --nv \
+    OUTPUT=$(singularity exec --bind /scratch --nv \
     --overlay /scratch/dns5508/env/another__overlay-25GB-500K.ext3:ro \
     /scratch/dns5508/ubuntu-20.04.3.sif \
     /bin/bash -c "
@@ -55,14 +78,23 @@ run_training () {
       --device cuda:0 \
       --eval_device cuda:1 \
       --use_wandb
-    "
+    " 2>&1)
 
     STATUS=$?
 
-    if [ $STATUS -ne 0 ]; then
-        echo "❌ FAILED: $RUN_NAME"
-    else
+    echo "$OUTPUT"
+
+    if [ $STATUS -eq 0 ]; then
         echo "✅ SUCCESS: $RUN_NAME"
+
+        # Atomic append
+        echo "$RUN_NAME" >> "${COMPLETED_FILE}.tmp"
+        mv "${COMPLETED_FILE}.tmp" "$COMPLETED_FILE"
+
+        echo "${RUN_NAME},${MAX_SAMPLES:-full},${BATCH_SIZE},${LEARNING_RATE},success" >> $RESULTS_FILE
+    else
+        echo "❌ FAILED: $RUN_NAME"
+        echo "${RUN_NAME},${MAX_SAMPLES:-full},${BATCH_SIZE},${LEARNING_RATE},failed" >> $RESULTS_FILE
     fi
 
     echo ""
