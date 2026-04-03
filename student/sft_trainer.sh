@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=sft_trainer
+#SBATCH --job-name=sft_trainer_sweep
 #SBATCH --account=csci_ga_3033_131-2026sp
 #SBATCH --partition=c24m170-a100-2 
 #SBATCH --output=./logs/%j_%x.out
@@ -11,34 +11,80 @@
 # Configuration
 DATASET_DIR="/scratch/dns5508/dataset/intellect_math"
 MODEL_DIR="/scratch/dns5508/model"
-RUN_NAME="${1:-sft_run_$(date +%Y%m%d_%H%M%S)}"
-MAX_SAMPLES="${2:-1024}"
-BATCH_SIZE="${3:-32}"
-LEARNING_RATE="${4:-5e-5}"
-NUM_EPOCHS="${5:-3}"
 
-singularity exec --bind /scratch --nv \
---overlay /scratch/dns5508/env/another__overlay-25GB-500K.ext3:ro \
-/scratch/dns5508/ubuntu-20.04.3.sif \
-/bin/bash -c "
-source /ext3/miniconda3/etc/profile.d/conda.sh
-export PATH=/home/dns5508/.local/bin:\$PATH
-conda activate llmr
-cd /scratch/dns5508/LLMReasonersAssignment3
+# Dataset sizes ("" = full dataset)
+DATA_SIZES=(128 256 512 1024 "")
 
-python3 -m student.sft_trainer \
-  --train_data_path ${DATASET_DIR}/train \
-  --eval_data_path ${DATASET_DIR}/dev \
-  --output_dir ${MODEL_DIR} \
-  --run_name ${RUN_NAME} \
-  --num_epochs ${NUM_EPOCHS} \
-  --train_batch_size ${BATCH_SIZE} \
-  --learning_rate ${LEARNING_RATE} \
-  --max_train_samples ${MAX_SAMPLES} \
-  --eval_steps 100 \
-  --device cuda:0 \
-  --eval_device cuda:1 \
-  --use_wandb
-"
+# Hyperparameters
+LEARNING_RATES=(1e-4 5e-5)
+BATCH_SIZES=(16 32)
 
-echo "Training complete! Models saved to: ${MODEL_DIR}/${RUN_NAME}/"
+NUM_EPOCHS=3
+
+run_training () {
+    local RUN_NAME=$1
+    local MAX_SAMPLES=$2
+    local BATCH_SIZE=$3
+    local LEARNING_RATE=$4
+
+    echo "=============================="
+    echo "Starting: $RUN_NAME"
+    echo "Samples: ${MAX_SAMPLES:-FULL}"
+    echo "Batch: $BATCH_SIZE | LR: $LEARNING_RATE"
+    echo "=============================="
+
+    singularity exec --bind /scratch --nv \
+    --overlay /scratch/dns5508/env/another__overlay-25GB-500K.ext3:ro \
+    /scratch/dns5508/ubuntu-20.04.3.sif \
+    /bin/bash -c "
+    source /ext3/miniconda3/etc/profile.d/conda.sh
+    export PATH=/home/dns5508/.local/bin:\$PATH
+    conda activate llmr
+    cd /scratch/dns5508/LLMReasonersAssignment3
+
+    python3 -m student.sft_trainer \
+      --train_data_path ${DATASET_DIR}/train \
+      --eval_data_path ${DATASET_DIR}/dev \
+      --output_dir ${MODEL_DIR} \
+      --run_name ${RUN_NAME} \
+      --num_epochs ${NUM_EPOCHS} \
+      --train_batch_size ${BATCH_SIZE} \
+      --learning_rate ${LEARNING_RATE} \
+      $( [ -n "$MAX_SAMPLES" ] && echo "--max_train_samples $MAX_SAMPLES" ) \
+      --eval_steps 100 \
+      --device cuda:0 \
+      --eval_device cuda:1 \
+      --use_wandb
+    "
+
+    STATUS=$?
+
+    if [ $STATUS -ne 0 ]; then
+        echo "❌ FAILED: $RUN_NAME"
+    else
+        echo "✅ SUCCESS: $RUN_NAME"
+    fi
+
+    echo ""
+}
+
+# Sweep Configuration
+
+for SIZE in "${DATA_SIZES[@]}"; do
+    for LR in "${LEARNING_RATES[@]}"; do
+        for BS in "${BATCH_SIZES[@]}"; do
+
+            SIZE_TAG=${SIZE:-full}
+
+            RUN_NAME="sft_${SIZE_TAG}_bs${BS}_lr${LR}"
+
+            # Run each experiment independently
+            run_training "$RUN_NAME" "$SIZE" "$BS" "$LR"
+
+        done
+    done
+done
+
+echo "=============================="
+echo "SWEEP COMPLETE"
+echo "=============================="
