@@ -66,6 +66,64 @@ def load_policy_into_vllm_instance(policy: PreTrainedModel, llm: LLM):
     llm_model.load_weights(state_dict.items())
 
 
+def load_data_from_path(data_path: str, max_samples: Optional[int] = None) -> list:
+    """
+    Load data from JSON/JSONL file or directory.
+    
+    Args:
+        data_path: Path to JSON file, JSONL file, or directory containing JSON/JSONL files.
+        max_samples: Maximum number of samples to load (None for all).
+    
+    Returns:
+        List of data examples.
+    """
+    data = []
+    
+    # Handle both file and directory paths
+    if os.path.isdir(data_path):
+        # Look for JSON or JSONL files
+        json_files = sorted([f for f in os.listdir(data_path) if f.endswith(('.json', '.jsonl'))])
+        file_paths = [os.path.join(data_path, f) for f in json_files]
+    else:
+        file_paths = [data_path]
+    
+    for file_path in file_paths:
+        print(f"Loading data from {file_path}")
+        with open(file_path) as f:
+            content = f.read()
+        
+        # Try to load as JSON array first (single JSON file with array)
+        try:
+            data_list = json.loads(content)
+            if isinstance(data_list, list):
+                for example in data_list:
+                    if max_samples and len(data) >= max_samples:
+                        break
+                    data.append(example)
+            else:
+                # Single JSON object, wrap in list
+                data.append(data_list)
+        except json.JSONDecodeError:
+            # Fall back to line-by-line JSON (JSONL format)
+            print(f"Warning: Could not parse {file_path} as JSON array, trying line-by-line JSONL format.")
+            for line in content.strip().split('\n'):
+                if not line.strip():
+                    continue
+                if max_samples and len(data) >= max_samples:
+                    break
+                try:
+                    example = json.loads(line.strip())
+                    data.append(example)
+                except json.JSONDecodeError as e:
+                    print(f"Warning: Could not parse line in {file_path}: {e}")
+        
+        if max_samples and len(data) >= max_samples:
+            break
+
+    print(f"Loaded {len(data)} samples")
+    return data
+
+
 class SFTDataset(Dataset):
     """Dataset for SFT training with prompt-output pairs."""
 
@@ -77,29 +135,11 @@ class SFTDataset(Dataset):
     ):
         """
         Args:
-            data_path: Path to JSONL file or directory containing JSONL files.
+            data_path: Path to JSONL file, JSON file, or directory containing JSON/JSONL files.
             tokenizer: HuggingFace tokenizer.
             max_samples: Maximum number of samples to load (None for all).
         """
-        self.data = []
-        
-        # Handle both file and directory paths
-        if os.path.isdir(data_path):
-            jsonl_files = sorted([f for f in os.listdir(data_path) if f.endswith('.jsonl')])
-            file_paths = [os.path.join(data_path, f) for f in jsonl_files]
-        else:
-            file_paths = [data_path]
-        
-        for file_path in file_paths:
-            with open(file_path) as f:
-                for i, line in enumerate(f):
-                    if max_samples and len(self.data) >= max_samples:
-                        break
-                    example = json.loads(line.strip())
-                    self.data.append(example)
-            if max_samples and len(self.data) >= max_samples:
-                break
-
+        self.data = load_data_from_path(data_path, max_samples=max_samples)
         self.tokenizer = tokenizer
 
     def __len__(self):
@@ -140,7 +180,7 @@ def evaluate_on_math(
     Args:
         policy: Policy model.
         llm: vLLM instance for inference.
-        eval_dataset_path: Path to evaluation dataset JSONL.
+        eval_dataset_path: Path to evaluation dataset (JSON, JSONL, or directory).
         tokenizer: HuggingFace tokenizer.
         max_eval_samples: Max samples to evaluate.
         num_generations: Number of generations per prompt.
@@ -157,13 +197,7 @@ def evaluate_on_math(
         }
 
     # Load evaluation data
-    eval_data = []
-    with open(eval_dataset_path) as f:
-        for i, line in enumerate(f):
-            if max_eval_samples and i >= max_eval_samples:
-                break
-            example = json.loads(line.strip())
-            eval_data.append(example)
+    eval_data = load_data_from_path(eval_dataset_path, max_samples=max_eval_samples)
 
     # Load policy into vLLM
     load_policy_into_vllm_instance(policy, llm)
@@ -196,8 +230,6 @@ def evaluate_on_math(
         "correct": correct,
         "total": total,
     }
-
-
 def train_sft(
     model_id: str = "Qwen/Qwen2.5-Math-1.5B",
     train_data_path: str = "data/train.jsonl",
