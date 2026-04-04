@@ -136,33 +136,14 @@ class SFTDataset(Dataset):
 
     def __getitem__(self, idx):
         example = self.data[idx]
-        # Handle both formats: (1) prompt/output fields and (2) messages/ground_truth fields
-        if "prompt" in example and "output" in example:
-            prompt = example.get("prompt", "")
-            output = example.get("output", "")
-        elif "messages" in example:
-            # Extract prompt from system+user messages, output from assistant message
-            messages = example.get("messages", [])
-            prompt_parts = []
-            output = ""
-            for msg in messages:
-                role = msg.get("role", "")
-                content = msg.get("content", "")
-                if role in ["system", "user"]:
-                    prompt_parts.append(content)
-                elif role == "assistant":
-                    output = content
-            prompt = "\n".join(prompt_parts)
-        else:
-            # Fallback to empty if format is not recognized
-            prompt = ""
-            output = ""
+        prompt, output = extract_prompt_and_target(example)
+        if not prompt and not output:
             print(f"Warning: Unrecognized format for example at index {idx}: {example}")
         return {"prompt": prompt, "output": output}
 
 
 def collate_fn(batch, tokenizer: PreTrainedTokenizerBase):
-    """Collate batch of examples."""
+    """Collate batch of examples for training."""
     prompts = [example["prompt"] for example in batch]
     outputs = [example["output"] for example in batch]
 
@@ -174,12 +155,63 @@ def collate_fn(batch, tokenizer: PreTrainedTokenizerBase):
     return tokenized
 
 
+def eval_collate_fn(batch):
+    """Collate batch for evaluation (no tokenization, vLLM handles that)."""
+    prompts = [example["prompt"] for example in batch]
+    targets = [example["output"] for example in batch]
+    
+    # Filter out empty prompts
+    valid_pairs = [(p, t) for p, t in zip(prompts, targets) if p.strip()]
+    
+    if not valid_pairs:
+        return {"prompts": [], "targets": []}
+    
+    prompts, targets = zip(*valid_pairs)
+    return {
+        "prompts": list(prompts),
+        "targets": list(targets),
+    }
+
+
+def extract_prompt_and_target(example: dict) -> tuple:
+    """
+    Extract prompt and target from example data.
+    Handles both formats: (1) prompt/output fields and (2) messages/ground_truth or assistant fields.
+    
+    Returns:
+        (prompt_str, target_str) tuple
+    """
+    if "prompt" in example and "output" in example:
+        return example.get("prompt", ""), example.get("output", "")
+    elif "messages" in example:
+        # Extract prompt from system+user messages
+        messages = example.get("messages", [])
+        prompt_parts = []
+        target = ""
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role in ["system", "user"]:
+                prompt_parts.append(content)
+            elif role == "assistant":
+                # Prefer assistant message, fall back to ground_truth
+                target = content
+        prompt = "\n".join(prompt_parts)
+        # Use ground_truth if assistant message not found
+        if not target:
+            target = example.get("ground_truth", "")
+        return prompt, target
+    else:
+        return "", ""
+
+
 def evaluate_on_math(
     policy: PreTrainedModel,
     llm: LLM,
     eval_dataset_path: str,
     tokenizer: PreTrainedTokenizerBase,
     max_eval_samples: Optional[int] = None,
+    eval_batch_size: int = 32,
     num_generations: int = 1,
     generation_config: Optional[dict] = None,
 ) -> dict:
@@ -192,6 +224,7 @@ def evaluate_on_math(
         eval_dataset_path: Path to evaluation dataset (JSON, JSONL, or directory).
         tokenizer: HuggingFace tokenizer.
         max_eval_samples: Max samples to evaluate.
+        eval_batch_size: Batch size for evaluation.
         num_generations: Number of generations per prompt.
         generation_config: Config for vLLM sampling.
     
@@ -205,32 +238,51 @@ def evaluate_on_math(
             "top_p": 0.95,
         }
 
-    # Load evaluation data
-    eval_data = load_data_from_path(eval_dataset_path, max_samples=max_eval_samples)
+    # Load evaluation dataset using same SFTDataset
+    eval_dataset = SFTDataset(
+        eval_dataset_path,
+        tokenizer,
+        max_samples=max_eval_samples,
+    )
+    
+    # Create DataLoader with eval collate function
+    eval_loader = DataLoader(
+        eval_dataset,
+        batch_size=eval_batch_size,
+        collate_fn=eval_collate_fn,
+    )
 
     # Load policy into vLLM
     load_policy_into_vllm_instance(policy, llm)
 
     # Generate and evaluate
     correct = 0
-    total = len(eval_data)
+    total = 0
 
     sampling_params = SamplingParams(**generation_config)
 
-    for example in eval_data:
-        prompt = example.get("prompt", "")
-        target = example.get("output", "")
-
-        # Generate
+    for batch in eval_loader:
+        prompts = batch["prompts"]
+        targets = batch["targets"]
+        
+        if not prompts:  # Skip empty batches
+            continue
+        
+        # Generate all prompts in this batch
         outputs = llm.generate(
-            [prompt],
+            prompts,
             sampling_params=sampling_params,
         )
-        generated_text = outputs[0].outputs[0].text
-
-        # Simple exact match evaluation (can be improved)
-        if generated_text.strip() == target.strip():
-            correct += 1
+        
+        # Evaluate this batch
+        for i, output in enumerate(outputs):
+            generated_text = output.outputs[0].text
+            
+            # Simple exact match evaluation
+            if generated_text.strip() == targets[i].strip():
+                correct += 1
+            
+            total += 1
 
     accuracy = correct / total if total > 0 else 0.0
 
@@ -390,6 +442,7 @@ def train_sft(
                     eval_dataset_path=eval_data_path,
                     tokenizer=tokenizer,
                     max_eval_samples=max_eval_samples,
+                    eval_batch_size=train_batch_size,
                 )
 
                 if use_wandb:
