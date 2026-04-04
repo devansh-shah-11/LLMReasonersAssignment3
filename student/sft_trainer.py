@@ -2,6 +2,7 @@ import argparse
 import json
 import math
 import os
+import re
 import torch
 import torch.nn.functional as F
 import wandb
@@ -136,10 +137,12 @@ class SFTDataset(Dataset):
 
     def __getitem__(self, idx):
         example = self.data[idx]
-        prompt, output = extract_prompt_and_target(example)
+        prompt, output = extract_prompt_and_target(example, self.tokenizer)
         if not prompt and not output:
             print(f"Warning: Unrecognized format for example at index {idx}: {example}")
-        return {"prompt": prompt, "output": output}
+        # ground_truth is the bare answer string used for eval comparison
+        ground_truth = example.get("ground_truth", output)
+        return {"prompt": prompt, "output": output, "ground_truth": ground_truth}
 
 
 def collate_fn(batch, tokenizer: PreTrainedTokenizerBase):
@@ -156,16 +159,21 @@ def collate_fn(batch, tokenizer: PreTrainedTokenizerBase):
 
 
 def eval_collate_fn(batch):
-    """Collate batch for evaluation (no tokenization, vLLM handles that)."""
+    """Collate batch for evaluation (no tokenization, vLLM handles that).
+
+    Uses ground_truth (bare answer) as the target so we can compare against
+    the boxed answer extracted from the model's generated text.
+    """
     prompts = [example["prompt"] for example in batch]
-    targets = [example["output"] for example in batch]
-    
+    # Use ground_truth (bare answer) not the full CoT assistant response
+    targets = [example["ground_truth"] for example in batch]
+
     # Filter out empty prompts
     valid_pairs = [(p, t) for p, t in zip(prompts, targets) if p.strip()]
-    
+
     if not valid_pairs:
         return {"prompts": [], "targets": []}
-    
+
     prompts, targets = zip(*valid_pairs)
     return {
         "prompts": list(prompts),
@@ -173,33 +181,64 @@ def eval_collate_fn(batch):
     }
 
 
-def extract_prompt_and_target(example: dict) -> tuple:
+def extract_boxed_answer(text: str) -> str:
+    """Extract the last \\boxed{...} answer from text, handling nested braces."""
+    idx = text.rfind(r'\boxed{')
+    if idx == -1:
+        return text.strip()
+    start = idx + len(r'\boxed{')
+    depth = 1
+    for i in range(start, len(text)):
+        if text[i] == '{':
+            depth += 1
+        elif text[i] == '}':
+            depth -= 1
+            if depth == 0:
+                return text[start:i].strip()
+    return text.strip()
+
+
+def extract_prompt_and_target(example: dict, tokenizer=None) -> tuple:
     """
     Extract prompt and target from example data.
-    Handles both formats: (1) prompt/output fields and (2) messages/ground_truth or assistant fields.
-    
+    Handles both formats: (1) prompt/output/response fields and (2) messages/ground_truth or assistant fields.
+
+    For messages format, applies the tokenizer chat template if provided so the
+    model sees the correct special tokens during both training and evaluation.
+
     Returns:
-        (prompt_str, target_str) tuple
+        (prompt_str, target_str) tuple where target_str is the full assistant
+        response (suitable for SFT training).
     """
-    if "prompt" in example and "output" in example:
-        return example.get("prompt", ""), example.get("output", "")
+    if "prompt" in example and ("output" in example or "response" in example):
+        # Bug fix: also handle "response" field (not just "output")
+        return example.get("prompt", ""), example.get("output", example.get("response", ""))
     elif "messages" in example:
-        # Extract prompt from system+user messages
         messages = example.get("messages", [])
-        prompt_parts = []
         target = ""
+        prompt_messages = []
         for msg in messages:
             role = msg.get("role", "")
             content = msg.get("content", "")
             if role in ["system", "user"]:
-                prompt_parts.append(content)
+                prompt_messages.append({"role": role, "content": content})
             elif role == "assistant":
-                # Prefer assistant message, fall back to ground_truth
                 target = content
-        prompt = "\n".join(prompt_parts)
-        # Use ground_truth if assistant message not found
+        # Use ground_truth as training target if no assistant message found
         if not target:
             target = example.get("ground_truth", "")
+        # Apply chat template for proper special-token formatting
+        if tokenizer is not None and hasattr(tokenizer, "apply_chat_template"):
+            try:
+                prompt = tokenizer.apply_chat_template(
+                    prompt_messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            except Exception:
+                prompt = "\n".join(m["content"] for m in prompt_messages)
+        else:
+            prompt = "\n".join(m["content"] for m in prompt_messages)
         return prompt, target
     else:
         return "", ""
@@ -277,11 +316,13 @@ def evaluate_on_math(
         # Evaluate this batch
         for i, output in enumerate(outputs):
             generated_text = output.outputs[0].text
-            
-            # Simple exact match evaluation
-            if generated_text.strip() == targets[i].strip():
+
+            # Extract the \boxed{...} answer from the generated CoT and compare
+            # against the ground_truth (bare answer string)
+            generated_answer = extract_boxed_answer(generated_text)
+            if generated_answer == targets[i].strip():
                 correct += 1
-            
+
             total += 1
 
     accuracy = correct / total if total > 0 else 0.0
@@ -291,6 +332,7 @@ def evaluate_on_math(
         "correct": correct,
         "total": total,
     }
+
 def train_sft(
     model_id: str = "Qwen/Qwen2.5-Math-1.5B",
     train_data_path: str = "data/train.jsonl",
@@ -442,7 +484,7 @@ def train_sft(
                     eval_dataset_path=eval_data_path,
                     tokenizer=tokenizer,
                     max_eval_samples=max_eval_samples,
-                    eval_batch_size=train_batch_size,
+                    eval_batch_size=train_batch_size,  # Use same batch size for eval
                 )
 
                 if use_wandb:
