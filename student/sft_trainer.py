@@ -256,17 +256,21 @@ def evaluate_on_math(
 ) -> dict:
     """
     Evaluate policy on MATH validation set.
-    
+
+    All prompts are submitted to vLLM in one call so its continuous-batching
+    scheduler can maximise GPU utilisation. The eval_batch_size parameter is
+    kept for API compatibility but is no longer used for generation.
+
     Args:
         policy: Policy model.
         llm: vLLM instance for inference.
         eval_dataset_path: Path to evaluation dataset (JSON, JSONL, or directory).
         tokenizer: HuggingFace tokenizer.
         max_eval_samples: Max samples to evaluate.
-        eval_batch_size: Batch size for evaluation.
+        eval_batch_size: Unused (kept for API compatibility).
         num_generations: Number of generations per prompt.
         generation_config: Config for vLLM sampling.
-    
+
     Returns:
         Dict with evaluation metrics.
     """
@@ -277,54 +281,38 @@ def evaluate_on_math(
             "top_p": 0.95,
         }
 
-    # Load evaluation dataset using same SFTDataset
+    # Load evaluation dataset
     eval_dataset = SFTDataset(
         eval_dataset_path,
         tokenizer,
         max_samples=max_eval_samples,
     )
-    
-    # Create DataLoader with eval collate function
-    eval_loader = DataLoader(
-        eval_dataset,
-        batch_size=eval_batch_size,
-        collate_fn=eval_collate_fn,
-    )
+
+    # Collect all prompts and ground-truth answers upfront
+    all_prompts = []
+    all_targets = []
+    for item in eval_dataset:
+        if item["prompt"].strip():
+            all_prompts.append(item["prompt"])
+            all_targets.append(item["ground_truth"].strip())
+
+    if not all_prompts:
+        return {"accuracy": 0.0, "correct": 0, "total": 0}
 
     # Load policy into vLLM
     load_policy_into_vllm_instance(policy, llm)
 
-    # Generate and evaluate
-    correct = 0
-    total = 0
-
+    # Single generate call — vLLM handles its own internal batching
     sampling_params = SamplingParams(**generation_config)
+    outputs = llm.generate(all_prompts, sampling_params=sampling_params)
 
-    for batch in eval_loader:
-        prompts = batch["prompts"]
-        targets = batch["targets"]
-        
-        if not prompts:  # Skip empty batches
-            continue
-        
-        # Generate all prompts in this batch
-        outputs = llm.generate(
-            prompts,
-            sampling_params=sampling_params,
-        )
-        
-        # Evaluate this batch
-        for i, output in enumerate(outputs):
-            generated_text = output.outputs[0].text
+    correct = 0
+    for output, target in zip(outputs, all_targets):
+        generated_answer = extract_boxed_answer(output.outputs[0].text)
+        if generated_answer == target:
+            correct += 1
 
-            # Extract the \boxed{...} answer from the generated CoT and compare
-            # against the ground_truth (bare answer string)
-            generated_answer = extract_boxed_answer(generated_text)
-            if generated_answer == targets[i].strip():
-                correct += 1
-
-            total += 1
-
+    total = len(all_prompts)
     accuracy = correct / total if total > 0 else 0.0
 
     return {
