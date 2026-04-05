@@ -1,551 +1,430 @@
 import argparse
 import json
-import math
 import os
+import random
 import re
-import torch
-import torch.nn.functional as F
-import wandb
 from pathlib import Path
-from typing import Optional
-from unittest.mock import patch
 
-import torch.optim as optim
-from datetime import datetime
+import numpy as np
+import torch
+import wandb
+from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    PreTrainedModel,
-    PreTrainedTokenizerBase,
-)
+from transformers import AutoModelForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup
 from vllm import LLM, SamplingParams
-from vllm.model_executor import set_random_seed as vllm_set_random_seed
 
-from .sft_helper import (
+from sft_helper import (
     tokenize_prompt_and_output,
     get_response_log_probs,
     sft_microbatch_train_step,
 )
 
+def parse_args():
+    p = argparse.ArgumentParser()
 
-def init_vllm(model_id: str, device: str, seed: int, gpu_memory_utilization: float = 0.85):
-    """
-    Start the inference process, here we use vLLM to hold a model on
-    a GPU separate from the policy.
-    """
-    vllm_set_random_seed(seed)
-    # Monkeypatch from TRL:
-    # https://github.com/huggingface/trl/blob/
-    # 22759c820867c8659d00082ba8cf004e963873c1/trl/trainer/grpo_trainer.py
-    # Patch vLLM to make sure we can
-    # (1) place the vLLM model on the desired device (world_size_patch) and
-    # (2) avoid a test that is not designed for our setting (profiling_patch).
-    world_size_patch = patch("torch.distributed.get_world_size", return_value=1)
-    profiling_patch = patch(
-        "vllm.worker.worker.Worker._assert_memory_footprint_increased_during_profiling",
-        return_value=None
-    )
+    # Paths (match sbatch script exactly)
+    p.add_argument("--train_data_path", type=str, required=True)
+    p.add_argument("--eval_data_path", type=str, required=True)
+    p.add_argument("--output_dir", type=str, required=True)
+    p.add_argument("--run_name", type=str, default="sft_run")
 
-    with world_size_patch, profiling_patch:
-        return LLM(
-            model=model_id,
-            device=device,
-            dtype=torch.bfloat16,
-            enable_prefix_caching=True,
-            gpu_memory_utilization=gpu_memory_utilization,
+    # Training
+    p.add_argument("--num_epochs", type=int,   default=3)
+    p.add_argument("--train_batch_size", type=int,   default=2,
+                   help="Effective (logical) batch size.")
+    p.add_argument("--microbatch_size",  type=int,   default=1,
+                   help="Physical per-step batch size; grad_accum = train_batch_size // microbatch_size.")
+    p.add_argument("--learning_rate",    type=float, default=1e-4)
+    p.add_argument("--max_train_samples",type=int,   default=None,
+                   help="Cap on unique training examples. Omit for full dataset.")
+    p.add_argument("--max_seq_len",  type=int,   default=1024)
+    p.add_argument("--warmup_ratio", type=float, default=0.05)
+    p.add_argument("--weight_decay", type=float, default=0.01)
+    p.add_argument("--seed", type=int,   default=42)
+
+    # Model
+    p.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-Math-1.5B")
+
+    # Eval
+    p.add_argument("--eval_samples",  type=int, default=200,
+                   help="Max val records used per accuracy eval.")
+    p.add_argument("--max_new_tokens",type=int, default=1024)
+
+    # Devices
+    p.add_argument("--device",       type=str, default="cuda:0",
+                   help="Device for policy model.")
+    p.add_argument("--eval_device",  type=str, default="cuda:1",
+                   help="Device for vLLM engine.")
+
+    # Logging
+    p.add_argument("--use_wandb",      action="store_true")
+    p.add_argument("--wandb_project",  type=str, default="sft_math")
+
+    return p.parse_args()
+
+
+def load_jsonl(path: str) -> list[dict]:
+    records = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+    return records
+
+
+def build_prompt_and_output(record: dict) -> tuple[str, str]:
+    """Extract (prompt_str, output_str) from a messages record."""
+    system_content = user_content = assistant_content = ""
+    for msg in record["messages"]:
+        role    = msg.get("role", "")
+        content = msg.get("content", "")
+        if role == "system":
+            system_content = content
+        elif role == "user":
+            user_content = content
+        elif role == "assistant":
+            assistant_content = content
+
+    if system_content:
+        prompt = f"System: {system_content}\nUser: {user_content}\nAssistant:"
+    else:
+        prompt = f"User: {user_content}\nAssistant:"
+
+    return prompt, assistant_content
+
+
+class MathSFTDataset(Dataset):
+    def __init__(self, records: list[dict]):
+        self.records = records
+
+    def __len__(self):
+        return len(self.records)
+
+    def __getitem__(self, idx):
+        record = self.records[idx]
+        prompt, output = build_prompt_and_output(record)
+        return {
+            "prompt":       prompt,
+            "output":       output,
+            "ground_truth": record.get("ground_truth", ""),
+        }
+
+
+def make_collate_fn(tokenizer, max_seq_len: int):
+    def _collate(batch):
+        result = tokenize_prompt_and_output(
+            [b["prompt"] for b in batch],
+            [b["output"] for b in batch],
+            tokenizer,
         )
+        for k in ("input_ids", "labels", "response_mask"):
+            result[k] = result[k][:, :max_seq_len]
+        result["ground_truths"] = [b["ground_truth"] for b in batch]
+        return result
+    return _collate
 
 
-def load_policy_into_vllm_instance(policy: PreTrainedModel, llm: LLM):
-    """
-    Copied from https://github.com/huggingface/trl/blob/
-    22759c820867c8659d00082ba8cf004e963873c1/trl/trainer/grpo_trainer.py#L670.
-    """
-    state_dict = policy.state_dict()
-    llm_model = llm.llm_engine.model_executor.driver_worker.model_runner.model
+# ---------------------------------------------------------------------------
+# Answer extraction
+# ---------------------------------------------------------------------------
+
+_BOXED_RE       = re.compile(r"\\boxed\{([^}]*)\}")
+_LAST_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def extract_answer(text: str) -> str:
+    m = _BOXED_RE.findall(text)
+    if m:
+        return m[-1].strip()
+    n = _LAST_NUMBER_RE.findall(text)
+    return n[-1] if n else (text.strip().split()[-1] if text.strip() else "")
+
+
+def is_correct(pred: str, gold: str) -> bool:
+    pred = pred.strip().lower().replace(",", "")
+    gold = gold.strip().lower().replace(",", "")
+    try:
+        return abs(float(pred) - float(gold)) < 1e-6
+    except ValueError:
+        return pred == gold
+
+
+# ---------------------------------------------------------------------------
+# vLLM
+# ---------------------------------------------------------------------------
+
+def init_vllm(model_name: str, eval_device: str, dtype: str = "bfloat16") -> LLM:
+    # eval_device is e.g. "cuda:1" — vLLM wants the device index
+    gpu_id = int(eval_device.split(":")[-1])
+    print(f"[vLLM] Starting engine on {eval_device} …")
+    llm = LLM(
+        model=model_name,
+        dtype=dtype,
+        tensor_parallel_size=1,
+        gpu_memory_utilization=0.85,
+        device=f"cuda:{gpu_id}",
+        trust_remote_code=True,
+        enforce_eager=False,
+    )
+    print("[vLLM] Ready.")
+    return llm
+
+
+def sync_weights_to_vllm(llm: LLM, policy_model, sync_dir: str):
+    """Save policy weights to disk and hot-load them into the live vLLM engine."""
+    policy_model.save_pretrained(sync_dir)
+    llm_model = (
+        llm.llm_engine
+           .model_executor
+           .driver_worker
+           .model_runner
+           .model
+    )
+    state_dict = AutoModelForCausalLM.from_pretrained(
+        sync_dir, torch_dtype=torch.bfloat16, trust_remote_code=True
+    ).state_dict()
     llm_model.load_weights(state_dict.items())
 
 
-def load_data_from_path(data_path: str, max_samples: Optional[int] = None) -> list:
-    """
-    Load data from JSON/JSONL file or directory.
-    
-    Args:
-        data_path: Path to JSON file, JSONL file, or directory containing JSON/JSONL files.
-        max_samples: Maximum number of samples to load (None for all).
-    
-    Returns:
-        List of data examples.
-    """
-    data = []
-    
-    # Handle both file and directory paths
-    if os.path.isdir(data_path):
-        # Look for JSON or JSONL files
-        json_files = sorted([f for f in os.listdir(data_path) if f.endswith(('.json', '.jsonl'))])
-        file_paths = [os.path.join(data_path, f) for f in json_files]
-    else:
-        file_paths = [data_path]
-    
-    for file_path in file_paths:
-        print(f"Loading data from {file_path}")
-        
-        try:
-            with open(file_path, encoding='utf-8') as f:
-                for line in f:
-                    if not line.strip():
-                        continue
-                    if max_samples and len(data) >= max_samples:
-                        break
-                    try:
-                        example = json.loads(line.strip())
-                        data.append(example)
-                    except json.JSONDecodeError as e:
-                        print(f"Warning: Could not parse line in {file_path}: {e}")
-        except UnicodeDecodeError:
-            print(f"Warning: Skipping {file_path} - not a valid UTF-8 text file")
-            continue
-        
-        if max_samples and len(data) >= max_samples:
-            break
-
-    print(f"Loaded {len(data)} samples")
-    return data
-
-
-class SFTDataset(Dataset):
-    """Dataset for SFT training with prompt-output pairs."""
-
-    def __init__(
-        self,
-        data_path: str,
-        tokenizer: PreTrainedTokenizerBase,
-        max_samples: Optional[int] = None,
-    ):
-        """
-        Args:
-            data_path: Path to JSONL file, JSON file, or directory containing JSON/JSONL files.
-            tokenizer: HuggingFace tokenizer.
-            max_samples: Maximum number of samples to load (None for all).
-        """
-        self.data = load_data_from_path(data_path, max_samples=max_samples)
-        self.tokenizer = tokenizer
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        example = self.data[idx]
-        prompt, output = extract_prompt_and_target(example, self.tokenizer)
-        if not prompt and not output:
-            print(f"Warning: Unrecognized format for example at index {idx}: {example}")
-        # ground_truth is the bare answer string used for eval comparison
-        ground_truth = example.get("ground_truth", output)
-        return {"prompt": prompt, "output": output, "ground_truth": ground_truth}
-
-
-def collate_fn(batch, tokenizer: PreTrainedTokenizerBase):
-    """Collate batch of examples for training."""
-    prompts = [example["prompt"] for example in batch]
-    outputs = [example["output"] for example in batch]
-
-    tokenized = tokenize_prompt_and_output(
-        prompt_strs=prompts,
-        output_strs=outputs,
-        tokenizer=tokenizer,
-    )
-    return tokenized
-
-
-def eval_collate_fn(batch):
-    """Collate batch for evaluation (no tokenization, vLLM handles that).
-
-    Uses ground_truth (bare answer) as the target so we can compare against
-    the boxed answer extracted from the model's generated text.
-    """
-    prompts = [example["prompt"] for example in batch]
-    # Use ground_truth (bare answer) not the full CoT assistant response
-    targets = [example["ground_truth"] for example in batch]
-
-    # Filter out empty prompts
-    valid_pairs = [(p, t) for p, t in zip(prompts, targets) if p.strip()]
-
-    if not valid_pairs:
-        return {"prompts": [], "targets": []}
-
-    prompts, targets = zip(*valid_pairs)
-    return {
-        "prompts": list(prompts),
-        "targets": list(targets),
-    }
-
-
-def extract_boxed_answer(text: str) -> str:
-    """Extract the last \\boxed{...} answer from text, handling nested braces."""
-    idx = text.rfind(r'\boxed{')
-    if idx == -1:
-        return text.strip()
-    start = idx + len(r'\boxed{')
-    depth = 1
-    for i in range(start, len(text)):
-        if text[i] == '{':
-            depth += 1
-        elif text[i] == '}':
-            depth -= 1
-            if depth == 0:
-                return text[start:i].strip()
-    return text.strip()
-
-
-def extract_prompt_and_target(example: dict, tokenizer=None) -> tuple:
-    """
-    Extract prompt and target from example data.
-    Handles both formats: (1) prompt/output/response fields and (2) messages/ground_truth or assistant fields.
-
-    For messages format, applies the tokenizer chat template if provided so the
-    model sees the correct special tokens during both training and evaluation.
-
-    Returns:
-        (prompt_str, target_str) tuple where target_str is the full assistant
-        response (suitable for SFT training).
-    """
-    if "prompt" in example and ("output" in example or "response" in example):
-        # Bug fix: also handle "response" field (not just "output")
-        return example.get("prompt", ""), example.get("output", example.get("response", ""))
-    elif "messages" in example:
-        messages = example.get("messages", [])
-        target = ""
-        prompt_messages = []
-        for msg in messages:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            if role in ["system", "user"]:
-                prompt_messages.append({"role": role, "content": content})
-            elif role == "assistant":
-                target = content
-        # Use ground_truth as training target if no assistant message found
-        if not target:
-            target = example.get("ground_truth", "")
-        # Apply chat template for proper special-token formatting
-        if tokenizer is not None and hasattr(tokenizer, "apply_chat_template"):
-            try:
-                prompt = tokenizer.apply_chat_template(
-                    prompt_messages,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                )
-            except Exception:
-                prompt = "\n".join(m["content"] for m in prompt_messages)
-        else:
-            prompt = "\n".join(m["content"] for m in prompt_messages)
-        return prompt, target
-    else:
-        return "", ""
-
-
-def evaluate_on_math(
-    policy: PreTrainedModel,
+def vllm_accuracy(
     llm: LLM,
-    eval_dataset_path: str,
-    tokenizer: PreTrainedTokenizerBase,
-    max_eval_samples: Optional[int] = None,
-    eval_batch_size: int = 32,
-    num_generations: int = 1,
-    generation_config: Optional[dict] = None,
-) -> dict:
-    """
-    Evaluate policy on MATH validation set.
+    records: list[dict],
+    max_new_tokens: int,
+    eval_samples: int,
+    rng: random.Random,
+) -> float:
+    subset  = rng.sample(records, min(eval_samples, len(records)))
+    prompts = [build_prompt_and_output(r)[0] for r in subset]
+    golds   = [r.get("ground_truth", "") for r in subset]
 
-    All prompts are submitted to vLLM in one call so its continuous-batching
-    scheduler can maximise GPU utilisation. The eval_batch_size parameter is
-    kept for API compatibility but is no longer used for generation.
-
-    Args:
-        policy: Policy model.
-        llm: vLLM instance for inference.
-        eval_dataset_path: Path to evaluation dataset (JSON, JSONL, or directory).
-        tokenizer: HuggingFace tokenizer.
-        max_eval_samples: Max samples to evaluate.
-        eval_batch_size: Unused (kept for API compatibility).
-        num_generations: Number of generations per prompt.
-        generation_config: Config for vLLM sampling.
-
-    Returns:
-        Dict with evaluation metrics.
-    """
-    if generation_config is None:
-        generation_config = {
-            "max_tokens": 1024,
-            "temperature": 0.7,
-            "top_p": 0.95,
-        }
-
-    # Load evaluation dataset
-    eval_dataset = SFTDataset(
-        eval_dataset_path,
-        tokenizer,
-        max_samples=max_eval_samples,
+    outputs = llm.generate(
+        prompts,
+        SamplingParams(temperature=0.0, max_tokens=max_new_tokens, stop=["</s>", "\n\n\n"]),
     )
-
-    # Collect all prompts and ground-truth answers upfront
-    all_prompts = []
-    all_targets = []
-    for item in eval_dataset:
-        if item["prompt"].strip():
-            all_prompts.append(item["prompt"])
-            all_targets.append(item["ground_truth"].strip())
-
-    if not all_prompts:
-        return {"accuracy": 0.0, "correct": 0, "total": 0}
-
-    # Load policy into vLLM
-    load_policy_into_vllm_instance(policy, llm)
-
-    # Single generate call — vLLM handles its own internal batching
-    sampling_params = SamplingParams(**generation_config)
-    outputs = llm.generate(all_prompts, sampling_params=sampling_params)
-
-    correct = 0
-    for output, target in zip(outputs, all_targets):
-        generated_answer = extract_boxed_answer(output.outputs[0].text)
-        if generated_answer == target:
-            correct += 1
-
-    total = len(all_prompts)
-    accuracy = correct / total if total > 0 else 0.0
-
-    return {
-        "accuracy": accuracy,
-        "correct": correct,
-        "total": total,
-    }
-
-def train_sft(
-    model_id: str = "Qwen/Qwen2.5-Math-1.5B",
-    train_data_path: str = "data/train.jsonl",
-    eval_data_path: str = "data/eval.jsonl",
-    output_dir: str = "output/sft",
-    num_train_epochs: int = 3,
-    train_batch_size: int = 32,
-    eval_batch_size: int = 32,
-    learning_rate: float = 1e-4,
-    max_train_samples: Optional[int] = None,
-    max_eval_samples: Optional[int] = None,
-    eval_steps: int = 100,
-    gradient_accumulation_steps: int = 1,
-    max_grad_norm: float = 1.0,
-    seed: int = 42,
-    device: str = "cuda:0",
-    eval_device: str = "cuda:1",
-    use_wandb: bool = True,
-    run_name: str = "sft-run",
-):
-    """
-    Train SFT policy on MATH/Prime Intellect data.
-    
-    Args:
-        model_id: HuggingFace model ID.
-        train_data_path: Path to training JSONL.
-        eval_data_path: Path to evaluation JSONL.
-        output_dir: Base directory to save outputs.
-        num_train_epochs: Number of training epochs.
-        train_batch_size: Training batch size.
-        eval_batch_size: Evaluation batch size.
-        learning_rate: Learning rate.
-        max_train_samples: Max training samples (None for all).
-        max_eval_samples: Max eval samples (None for all).
-        eval_steps: Evaluate every N training steps.
-        gradient_accumulation_steps: Gradient accumulation steps.
-        max_grad_norm: Gradient clipping value.
-        seed: Random seed.
-        device: Device for policy training.
-        eval_device: Device for vLLM evaluation.
-        use_wandb: Whether to use Weights & Biases.
-        run_name: Name of this training run (used in output directory path).
-    """
-    # Setup - append run_name to output directory
-    torch.manual_seed(seed)
-    output_dir = f"{output_dir}/{run_name}"
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-    
-    print(f"Output directory: {output_dir}")
-
-    if use_wandb:
-        wandb.init(project="sft-math", name=run_name, config=locals())
-        wandb.define_metric("train_step")
-        wandb.define_metric("eval_step")
-        wandb.define_metric("train/*", step_metric="train_step")
-        wandb.define_metric("eval/*", step_metric="eval_step")
-
-    # Load model and tokenizer
-    print(f"Loading model {model_id}...")
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
-    policy = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        torch_dtype=torch.bfloat16,
-        device_map=device,
+    correct = sum(
+        is_correct(extract_answer(o.outputs[0].text), g)
+        for o, g in zip(outputs, golds)
     )
-    # Enable gradient checkpointing to reduce memory usage
-    policy.gradient_checkpointing_enable()
-    policy.train()
+    return correct / len(subset)
 
-    # Setup optimizer
-    optimizer = optim.AdamW(policy.parameters(), lr=learning_rate)
 
-    # Load datasets
-    print(f"Loading training data from {train_data_path}...")
-    train_dataset = SFTDataset(
-        train_data_path,
-        tokenizer,
-        max_samples=max_train_samples,
-    )
+# ---------------------------------------------------------------------------
+# Val loss + entropy (on policy GPU, no generation needed)
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def evaluate_val_metrics(
+    model,
+    loader: DataLoader,
+    device: torch.device,
+    max_batches: int = 50,
+) -> tuple[float, float]:
+    """Returns (mean_val_loss, mean_response_token_entropy)."""
+    model.eval()
+    total_loss = total_entropy = total_tokens = 0.0
+
+    for i, batch in enumerate(loader):
+        if i >= max_batches:
+            break
+        input_ids     = batch["input_ids"].to(device)
+        labels        = batch["labels"].to(device)
+        response_mask = batch["response_mask"].to(device)
+
+        out       = get_response_log_probs(model, input_ids, labels, return_token_entropy=True)
+        log_probs = out["log_probs"]
+        entropy   = out["token_entropy"]
+        mask_f    = response_mask.float()
+        n         = mask_f.sum().item()
+
+        if n > 0:
+            total_loss    += -(log_probs * mask_f).sum().item()
+            total_entropy +=  (entropy   * mask_f).sum().item()
+            total_tokens  += n
+
+    if total_tokens == 0:
+        return float("inf"), 0.0
+    return total_loss / total_tokens, total_entropy / total_tokens
+
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+
+def train(args):
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+
+    policy_device = torch.device(args.device)
+    output_dir    = Path(args.output_dir) / args.run_name
+    output_dir.mkdir(parents=True, exist_ok=True)
+    sync_dir = str(output_dir / "_ckpt_sync")
+    os.makedirs(sync_dir, exist_ok=True)
+
+    # ---- Load data ----
+    print(f"Loading train: {args.train_data_path}")
+    train_records = load_jsonl(args.train_data_path)
+    print(f"Loading eval:  {args.eval_data_path}")
+    eval_records  = load_jsonl(args.eval_data_path)
+
+    random.shuffle(train_records)
+    if args.max_train_samples:
+        train_records = train_records[:args.max_train_samples]
+
+    print(f"Train: {len(train_records)}  |  Eval: {len(eval_records)}")
+
+    # ---- Tokenizer + model ----
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model_name, torch_dtype=torch.bfloat16, trust_remote_code=True
+    ).to(policy_device)
+
+    # ---- vLLM engine ----
+    llm = init_vllm(args.model_name, args.eval_device)
+
+    # ---- DataLoaders ----
+    collate = make_collate_fn(tokenizer, args.max_seq_len)
+    grad_accum   = max(1, args.train_batch_size // args.microbatch_size)
     train_loader = DataLoader(
-        train_dataset,
-        batch_size=train_batch_size,
+        MathSFTDataset(train_records),
+        batch_size=args.microbatch_size,
         shuffle=True,
-        collate_fn=lambda batch: collate_fn(batch, tokenizer),
+        collate_fn=collate,
+        drop_last=True,
+    )
+    eval_loader = DataLoader(
+        MathSFTDataset(eval_records),
+        batch_size=args.microbatch_size,
+        shuffle=False,
+        collate_fn=collate,
     )
 
-    # Initialize vLLM for evaluation
-    print(f"Initializing vLLM on {eval_device}...")
-    llm = init_vllm(model_id, device=eval_device, seed=seed)
+    # ---- Optimizer & scheduler ----
+    steps_per_epoch = max(1, len(train_loader) // grad_accum)
+    total_steps     = steps_per_epoch * args.num_epochs
+    warmup_steps    = max(1, int(total_steps * args.warmup_ratio))
+    
+    evals_per_epoch = 2
+    eval_steps = max(1, steps_per_epoch // evals_per_epoch)
 
-    # Training loop
-    global_step = 0
-    best_eval_accuracy = 0.0
+    optimizer = AdamW(model.parameters(), lr=args.learning_rate,
+                      weight_decay=args.weight_decay)
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps
+    )
 
-    for epoch in range(num_train_epochs):
-        print(f"\nEpoch {epoch + 1}/{num_train_epochs}")
-        epoch_loss = 0.0
+    print(
+        f"\nRun: {args.run_name}\n"
+        f"  train_samples={len(train_records)}  grad_accum={grad_accum}\n"
+        f"  steps_per_epoch={steps_per_epoch}  total_steps={total_steps}\n"
+        f"  eval_every={eval_steps} steps (~{evals_per_epoch} evals/epoch)\n"
+    )
 
-        for batch_idx, batch in enumerate(train_loader):
-            # Move batch to device
-            input_ids = batch["input_ids"].to(device)
-            labels = batch["labels"].to(device)
-            response_mask = batch["response_mask"].to(device)
+    # ---- wandb ----
+    if args.use_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            name=args.run_name,
+            config=vars(args),
+        )
 
-            # Get log probs
-            log_probs_output = get_response_log_probs(
-                policy,
-                input_ids=input_ids,
-                labels=labels,
-                return_token_entropy=False,
-            )
-            log_probs = log_probs_output["log_probs"]
+    eval_rng      = random.Random(args.seed + 1)
+    global_step   = 0
+    best_val_loss = float("inf")
+    accum_loss    = 0.0
 
-            # Training step
-            loss, _ = sft_microbatch_train_step(
+    # ---- Training loop ----
+    for epoch in range(1, args.num_epochs + 1):
+        model.train()
+        optimizer.zero_grad()
+
+        for micro_step, batch in enumerate(train_loader):
+            input_ids     = batch["input_ids"].to(policy_device)
+            labels        = batch["labels"].to(policy_device)
+            response_mask = batch["response_mask"].to(policy_device)
+
+            out       = get_response_log_probs(model, input_ids, labels)
+            log_probs = out["log_probs"]
+
+            n_response     = max(response_mask.sum().item(), 1.0)
+            scaled_loss, _ = sft_microbatch_train_step(
                 policy_log_probs=log_probs,
                 response_mask=response_mask,
-                gradient_accumulation_steps=gradient_accumulation_steps,
-                normalize_constant=1.0,
+                gradient_accumulation_steps=grad_accum,
+                normalize_constant=n_response,
             )
+            accum_loss += scaled_loss.item()
 
-            # Gradient accumulation
-            if (batch_idx + 1) % gradient_accumulation_steps == 0:
-                torch.nn.utils.clip_grad_norm_(policy.parameters(), max_grad_norm)
-                optimizer.step()
-                optimizer.zero_grad()
+            if (micro_step + 1) % grad_accum != 0:
+                continue
 
-            epoch_loss += loss.item()
+            # ---- Optimizer step ----
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad()
             global_step += 1
 
-            # Log metrics
-            if use_wandb:
-                wandb.log({
-                    "train/loss": loss.item(),
-                    "train_step": global_step,
-                })
+            train_loss = accum_loss * grad_accum
+            accum_loss = 0.0
 
-            if batch_idx % 10 == 0:
-                print(f"  Step {batch_idx}/{len(train_loader)}, Loss: {loss.item():.4f}")
+            if args.use_wandb:
+                wandb.log({"train/loss": train_loss,
+                           "train/lr":   scheduler.get_last_lr()[0]},
+                          step=global_step)
 
-            # Periodic evaluation
-            if global_step % eval_steps == 0:
-                print(f"\nEvaluating at step {global_step}...")
-                policy.eval()
-                
-                eval_metrics = evaluate_on_math(
-                    policy=policy,
-                    llm=llm,
-                    eval_dataset_path=eval_data_path,
-                    tokenizer=tokenizer,
-                    max_eval_samples=max_eval_samples,
-                    eval_batch_size=train_batch_size,  # Use same batch size for eval
+            # ---- Eval ----
+            if global_step % eval_steps == 0 or global_step == total_steps:
+                sync_weights_to_vllm(llm, model, sync_dir)
+                val_loss, val_entropy = evaluate_val_metrics(
+                    model, eval_loader, policy_device
+                )
+                val_acc = vllm_accuracy(
+                    llm, eval_records, args.max_new_tokens, args.eval_samples, eval_rng
                 )
 
-                if use_wandb:
-                    wandb.log({
-                        "eval/accuracy": eval_metrics["accuracy"],
-                        "eval_step": global_step,
-                    })
+                print(
+                    f"[epoch {epoch} | step {global_step:4d}]  "
+                    f"train_loss={train_loss:.4f}  "
+                    f"val_loss={val_loss:.4f}  "
+                    f"val_entropy={val_entropy:.4f}  "
+                    f"val_acc={val_acc:.3f}"
+                )
 
-                print(f"Eval Accuracy: {eval_metrics['accuracy']:.4f}")
+                if args.use_wandb:
+                    wandb.log({
+                        "eval/val_loss":    val_loss,
+                        "eval/val_entropy": val_entropy,
+                        "eval/val_acc":     val_acc,
+                    }, step=global_step)
 
                 # Save best model
-                if eval_metrics["accuracy"] > best_eval_accuracy:
-                    best_eval_accuracy = eval_metrics["accuracy"]
-                    policy.save_pretrained(f"{output_dir}/best_model")
-                    tokenizer.save_pretrained(f"{output_dir}/best_model")
-                    print(f"Saved best model with accuracy {best_eval_accuracy:.4f}")
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    model.save_pretrained(output_dir / "best")
+                    tokenizer.save_pretrained(output_dir / "best")
+                    print(f"  ✓ Best model saved (val_loss={best_val_loss:.4f})")
 
-                policy.train()
+                model.train()
 
-        # End of epoch
-        avg_epoch_loss = epoch_loss / len(train_loader)
-        print(f"Epoch {epoch + 1} Average Loss: {avg_epoch_loss:.4f}")
+        print(f"Epoch {epoch}/{args.num_epochs} done.")
 
-        # Save checkpoint
-        policy.save_pretrained(f"{output_dir}/checkpoint-epoch-{epoch + 1}")
-        tokenizer.save_pretrained(f"{output_dir}/checkpoint-epoch-{epoch + 1}")
+    # ---- Save final model ----
+    model.save_pretrained(output_dir / "final")
+    tokenizer.save_pretrained(output_dir / "final")
+    print(f"\nFinal model saved → {output_dir / 'final'}")
 
-    # Save final model
-    policy.save_pretrained(f"{output_dir}/final_model")
-    tokenizer.save_pretrained(f"{output_dir}/final_model")
-    print(f"\nTraining complete. Best accuracy: {best_eval_accuracy:.4f}")
-
-    if use_wandb:
+    # ---- Train loss drop summary ----
+    if args.use_wandb:
         wandb.finish()
+
+    import shutil
+    shutil.rmtree(sync_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
-    
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model_id", type=str, default="Qwen/Qwen2.5-Math-1.5B")
-    parser.add_argument("--train_data_path", type=str, required=True)
-    parser.add_argument("--eval_data_path", type=str, required=True)
-    parser.add_argument("--output_dir", type=str, default="output/sft")
-    parser.add_argument("--num_epochs", type=int, default=3)
-    parser.add_argument("--train_batch_size", type=int, default=32)
-    parser.add_argument("--learning_rate", type=float, default=1e-4)
-    parser.add_argument("--max_train_samples", type=int, default=None)
-    parser.add_argument("--max_eval_samples", type=int, default=None)
-    parser.add_argument("--eval_steps", type=int, default=100)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--device", type=str, default="cuda:0")
-    parser.add_argument("--eval_device", type=str, default="cuda:1")
-    parser.add_argument("--use_wandb", action="store_true")
-    parser.add_argument("--run_name", type=str, default=f"sft-math-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
-
-    args = parser.parse_args()
-
-    train_sft(
-        model_id=args.model_id,
-        train_data_path=args.train_data_path,
-        eval_data_path=args.eval_data_path,
-        output_dir=args.output_dir,
-        num_train_epochs=args.num_epochs,
-        train_batch_size=args.train_batch_size,
-        learning_rate=args.learning_rate,
-        max_train_samples=args.max_train_samples,
-        max_eval_samples=args.max_eval_samples,
-        eval_steps=args.eval_steps,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        seed=args.seed,
-        device=args.device,
-        eval_device=args.eval_device,
-        use_wandb=args.use_wandb,
-        run_name=args.run_name,
-    )
+    train(parse_args())
