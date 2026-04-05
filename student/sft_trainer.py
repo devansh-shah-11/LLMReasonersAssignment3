@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup
 from vllm import LLM, SamplingParams
 
-from sft_helper import (
+from student.sft_helper import (
     tokenize_prompt_and_output,
     get_response_log_probs,
     sft_microbatch_train_step,
