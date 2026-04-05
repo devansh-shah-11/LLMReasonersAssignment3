@@ -46,8 +46,6 @@ def parse_args():
     p.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-Math-1.5B")
 
     # Eval
-    p.add_argument("--eval_samples",  type=int, default=200,
-                   help="Max val records used per accuracy eval.")
     p.add_argument("--max_new_tokens",type=int, default=1024)
 
     # Devices
@@ -129,14 +127,30 @@ def make_collate_fn(tokenizer, max_seq_len: int):
 # Answer extraction
 # ---------------------------------------------------------------------------
 
-_BOXED_RE       = re.compile(r"\\boxed\{([^}]*)\}")
 _LAST_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
 
+def _extract_boxed(text: str) -> str | None:
+    """Extract the last \\boxed{...} content, handling nested braces."""
+    idx = text.rfind(r'\boxed{')
+    if idx == -1:
+        return None
+    start = idx + len(r'\boxed{')
+    depth = 1
+    i = start
+    while i < len(text) and depth > 0:
+        if text[i] == '{':
+            depth += 1
+        elif text[i] == '}':
+            depth -= 1
+        i += 1
+    return text[start:i - 1] if depth == 0 else None
+
+
 def extract_answer(text: str) -> str:
-    m = _BOXED_RE.findall(text)
-    if m:
-        return m[-1].strip()
+    m = _extract_boxed(text)
+    if m is not None:
+        return m.strip()
     n = _LAST_NUMBER_RE.findall(text)
     return n[-1] if n else (text.strip().split()[-1] if text.strip() else "")
 
@@ -181,22 +195,22 @@ def sync_weights_to_vllm(llm: LLM, policy_model, sync_dir: str):
            .model_runner
            .model
     )
-    state_dict = AutoModelForCausalLM.from_pretrained(
+    tmp_model  = AutoModelForCausalLM.from_pretrained(
         sync_dir, torch_dtype=torch.bfloat16, trust_remote_code=True
-    ).state_dict()
+    )
+    state_dict = tmp_model.state_dict()
     llm_model.load_weights(state_dict.items())
+    del tmp_model, state_dict
+    torch.cuda.empty_cache()
 
 
 def vllm_accuracy(
     llm: LLM,
     records: list[dict],
     max_new_tokens: int,
-    eval_samples: int,
-    rng: random.Random,
 ) -> float:
-    subset  = rng.sample(records, min(eval_samples, len(records)))
-    prompts = [build_prompt_and_output(r)[0] for r in subset]
-    golds   = [r.get("ground_truth", "") for r in subset]
+    prompts = [build_prompt_and_output(r)[0] for r in records]
+    golds   = [r.get("ground_truth", "") for r in records]
 
     outputs = llm.generate(
         prompts,
@@ -206,7 +220,7 @@ def vllm_accuracy(
         is_correct(extract_answer(o.outputs[0].text), g)
         for o, g in zip(outputs, golds)
     )
-    return correct / len(subset)
+    return correct / len(records)
 
 
 # ---------------------------------------------------------------------------
@@ -218,15 +232,12 @@ def evaluate_val_metrics(
     model,
     loader: DataLoader,
     device: torch.device,
-    max_batches: int = 50,
 ) -> tuple[float, float]:
     """Returns (mean_val_loss, mean_response_token_entropy)."""
     model.eval()
     total_loss = total_entropy = total_tokens = 0.0
 
-    for i, batch in enumerate(loader):
-        if i >= max_batches:
-            break
+    for batch in loader:
         input_ids     = batch["input_ids"].to(device)
         labels        = batch["labels"].to(device)
         response_mask = batch["response_mask"].to(device)
@@ -271,6 +282,13 @@ def train(args):
     random.shuffle(train_records)
     if args.max_train_samples:
         train_records = train_records[:args.max_train_samples]
+
+    # filter records with empty assistant outputs
+    n_before = len(train_records)
+    train_records = [r for r in train_records if build_prompt_and_output(r)[1].strip()]
+    n_skipped = n_before - len(train_records)
+    if n_skipped:
+        print(f"  Skipped {n_skipped} train records with empty outputs")
 
     print(f"Train: {len(train_records)}  |  Eval: {len(eval_records)}")
 
@@ -332,7 +350,6 @@ def train(args):
             config=vars(args),
         )
 
-    eval_rng      = random.Random(args.seed + 1)
     global_step   = 0
     best_val_loss = float("inf")
     accum_loss    = 0.0
@@ -384,7 +401,7 @@ def train(args):
                     model, eval_loader, policy_device
                 )
                 val_acc = vllm_accuracy(
-                    llm, eval_records, args.max_new_tokens, args.eval_samples, eval_rng
+                    llm, eval_records, args.max_new_tokens
                 )
 
                 print(
@@ -410,6 +427,19 @@ def train(args):
                     print(f"  ✓ Best model saved (val_loss={best_val_loss:.4f})")
 
                 model.train()
+
+        if len(train_loader) % grad_accum != 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad()
+            global_step += 1
+            train_loss = accum_loss * grad_accum
+            accum_loss = 0.0
+            if args.use_wandb:
+                wandb.log({"train/loss": train_loss,
+                           "train/lr":   scheduler.get_last_lr()[0]},
+                          step=global_step)
 
         print(f"Epoch {epoch}/{args.num_epochs} done.")
 
