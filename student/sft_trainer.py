@@ -31,9 +31,9 @@ def parse_args():
     # Training
     p.add_argument("--num_epochs", type=int,   default=3)
     p.add_argument("--train_batch_size", type=int,   default=2,
-                   help="Effective (logical) batch size.")
-    p.add_argument("--microbatch_size",  type=int,   default=1,
-                   help="Physical per-step batch size; grad_accum = train_batch_size // microbatch_size.")
+                   help="Physical per-step batch size (DataLoader batch_size).")
+    p.add_argument("--grad_accum_steps", type=int,   default=16,
+                   help="Gradient accumulation steps.")
     p.add_argument("--learning_rate",    type=float, default=1e-4)
     p.add_argument("--max_train_samples",type=int,   default=None,
                    help="Cap on unique training examples. Omit for full dataset.")
@@ -306,17 +306,17 @@ def train(args):
 
     # ---- DataLoaders ----
     collate = make_collate_fn(tokenizer, args.max_seq_len)
-    grad_accum   = max(1, args.train_batch_size // args.microbatch_size)
+    grad_accum   = max(1, args.grad_accum_steps)
     train_loader = DataLoader(
         MathSFTDataset(train_records),
-        batch_size=args.microbatch_size,
+        batch_size=args.train_batch_size,
         shuffle=True,
         collate_fn=collate,
         drop_last=True,
     )
     eval_loader = DataLoader(
         MathSFTDataset(eval_records),
-        batch_size=args.microbatch_size,
+        batch_size=args.train_batch_size,
         shuffle=False,
         collate_fn=collate,
     )
