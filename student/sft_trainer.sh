@@ -4,7 +4,7 @@
 #SBATCH --partition=c24m170-a100-2 
 #SBATCH --output=./logs/%j_%x.out
 #SBATCH --error=./logs/%j_%x.err
-#SBATCH --time=06:00:00
+#SBATCH --time=01:00:00
 #SBATCH --gres=gpu:a100:2
 #SBATCH --requeue
 
@@ -13,8 +13,8 @@ DATASET_DIR="/scratch/dns5508/dataset/intellect_math"
 MODEL_DIR="/scratch/dns5508/model"
 
 # Dataset sizes ("" = full dataset)
-DATA_SIZES=(128 256 512 1024 "")
-
+# DATA_SIZES=(128 256 512 1024 "")
+DATA_SIZES = (128 256)
 # Hyperparameters
 LEARNING_RATES=(1e-4 5e-5)
 BATCH_SIZES=(1 2)
@@ -74,7 +74,6 @@ run_training () {
       --train_batch_size ${BATCH_SIZE} \
       --learning_rate ${LEARNING_RATE} \
       $( [ -n "$MAX_SAMPLES" ] && echo "--max_train_samples $MAX_SAMPLES" ) \
-      --eval_steps 100 \
       --device cuda:0 \
       --eval_device cuda:1 \
       --use_wandb
