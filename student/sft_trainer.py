@@ -12,6 +12,8 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup
 from vllm import LLM, SamplingParams
+from unittest.mock import patch
+from vllm.model_executor import set_random_seed as vllm_set_random_seed
 
 from student.sft_helper import (
     tokenize_prompt_and_output,
@@ -169,17 +171,25 @@ def is_correct(pred: str, gold: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def init_vllm(model_name: str, dtype: str = "bfloat16") -> LLM:
-    # After CUDA_VISIBLE_DEVICES is set, vLLM always uses remapped index 1
     print(f"[vLLM] Starting engine on cuda:1 (remapped) …")
-    llm = LLM(
-        model=model_name,
-        dtype=dtype,
-        tensor_parallel_size=1,
-        gpu_memory_utilization=0.85,
-        device="cuda:1",
-        trust_remote_code=True,
-        enforce_eager=False,
+    vllm_set_random_seed(42)
+    # Monkeypatch from TRL: patch world_size so vLLM doesn't think it's in
+    # a multi-process context, and patch out the memory-profiling assertion
+    # that fires when PyTorch has already touched the GPU before vLLM init.
+    world_size_patch = patch("torch.distributed.get_world_size", return_value=1)
+    profiling_patch = patch(
+        "vllm.worker.worker.Worker._assert_memory_footprint_increased_during_profiling",
+        return_value=None,
     )
+    with world_size_patch, profiling_patch:
+        llm = LLM(
+            model=model_name,
+            device="cuda:1",
+            dtype=torch.bfloat16,
+            gpu_memory_utilization=0.85,
+            enable_prefix_caching=True,
+            trust_remote_code=True,
+        )
     print("[vLLM] Ready.")
     return llm
 
