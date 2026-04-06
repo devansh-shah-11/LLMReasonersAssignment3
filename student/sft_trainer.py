@@ -303,17 +303,19 @@ def train(args):
 
     print(f"Train: {len(train_records)}  |  Eval: {len(eval_records)}")
 
-    # ---- Tokenizer + model ----
+    # ---- Tokenizer ----
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    # ---- vLLM engine (must init BEFORE policy model for a clean memory baseline) ----
+    torch.cuda.empty_cache()
+    llm = init_vllm(args.model_name)
+
+    # ---- Policy model (loaded after vLLM so its memory profiling baseline is clean) ----
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name, torch_dtype=torch.bfloat16, trust_remote_code=True
     ).to(policy_device)
-
-    # ---- vLLM engine ----
-    llm = init_vllm(args.model_name)
 
     # ---- DataLoaders ----
     collate = make_collate_fn(tokenizer, args.max_seq_len)
