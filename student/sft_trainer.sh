@@ -14,7 +14,7 @@ MODEL_DIR="/scratch/dns5508/model"
 
 # Dataset sizes ("" = full dataset)
 # DATA_SIZES=(128 256 512 1024 "")
-DATA_SIZES = (128 256)
+DATA_SIZES=(128 256)
 # Hyperparameters
 LEARNING_RATES=(1e-4 5e-5)
 BATCH_SIZES=(1 2)
