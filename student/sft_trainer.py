@@ -390,13 +390,16 @@ def train(args):
             out       = get_response_log_probs(model, input_ids, labels)
             log_probs = out["log_probs"]
 
+            n_response = max(response_mask.sum().item(), 1.0)
+            batch_size = response_mask.shape[0]
+
             scaled_loss, _ = sft_microbatch_train_step(
                 policy_log_probs=log_probs,
                 response_mask=response_mask,
                 gradient_accumulation_steps=grad_accum,
-                normalize_constant=1,
+                normalize_constant=n_response / batch_size,
             )
-            accum_loss += scaled_loss.item()
+            accum_loss += scaled_loss.item() * grad_accum
 
             if (micro_step + 1) % grad_accum != 0:
                 continue
@@ -408,7 +411,7 @@ def train(args):
             optimizer.zero_grad()
             global_step += 1
 
-            train_loss = accum_loss * grad_accum
+            train_loss = accum_loss / grad_accum
             accum_loss = 0.0
 
             if args.use_wandb:
@@ -456,7 +459,7 @@ def train(args):
             scheduler.step()
             optimizer.zero_grad()
             global_step += 1
-            train_loss = accum_loss * grad_accum
+            train_loss = accum_loss / grad_accum  # average over microsteps, not sum
             accum_loss = 0.0
             if args.use_wandb:
                 wandb.log({"train/loss": train_loss,
