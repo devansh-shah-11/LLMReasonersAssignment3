@@ -390,12 +390,11 @@ def train(args):
             out       = get_response_log_probs(model, input_ids, labels)
             log_probs = out["log_probs"]
 
-            n_response     = max(response_mask.sum().item(), 1.0)
             scaled_loss, _ = sft_microbatch_train_step(
                 policy_log_probs=log_probs,
                 response_mask=response_mask,
                 gradient_accumulation_steps=grad_accum,
-                normalize_constant=n_response,
+                normalize_constant=1,
             )
             accum_loss += scaled_loss.item()
 
