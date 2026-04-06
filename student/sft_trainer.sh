@@ -10,7 +10,7 @@
 
 # Configuration
 DATASET_DIR="/scratch/dns5508/dataset/intellect_math"
-MODEL_DIR="/scratch/dns5508/model"
+MODEL_DIR="/scratch/dns5508/model_V2"
 
 # Dataset sizes ("" = full dataset)
 DATA_SIZES=(128 256 512 1024)
@@ -22,7 +22,7 @@ BATCH_SIZES=(1 2)
 NUM_EPOCHS=3
 
 # STATE TRACKING
-STATE_DIR="/scratch/dns5508/sft_sweep_state"
+STATE_DIR="/scratch/dns5508/sft_sweep_state_v2"
 mkdir -p $STATE_DIR
 
 COMPLETED_FILE="$STATE_DIR/completed_runs.txt"
