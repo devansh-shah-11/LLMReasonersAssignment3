@@ -168,16 +168,15 @@ def is_correct(pred: str, gold: str) -> bool:
 # vLLM
 # ---------------------------------------------------------------------------
 
-def init_vllm(model_name: str, eval_device: str, dtype: str = "bfloat16") -> LLM:
-    # eval_device is e.g. "cuda:1" — vLLM wants the device index
-    gpu_id = int(eval_device.split(":")[-1])
-    print(f"[vLLM] Starting engine on {eval_device} …")
+def init_vllm(model_name: str, dtype: str = "bfloat16") -> LLM:
+    # After CUDA_VISIBLE_DEVICES is set, vLLM always uses remapped index 1
+    print(f"[vLLM] Starting engine on cuda:1 (remapped) …")
     llm = LLM(
         model=model_name,
         dtype=dtype,
         tensor_parallel_size=1,
         gpu_memory_utilization=0.85,
-        device=f"cuda:{gpu_id}",
+        device="cuda:1",
         trust_remote_code=True,
         enforce_eager=False,
     )
@@ -195,8 +194,10 @@ def sync_weights_to_vllm(llm: LLM, policy_model, sync_dir: str):
            .model_runner
            .model
     )
+    # Load to CPU to avoid touching CUDA and polluting the vLLM GPU
     tmp_model  = AutoModelForCausalLM.from_pretrained(
-        sync_dir, torch_dtype=torch.bfloat16, trust_remote_code=True
+        sync_dir, torch_dtype=torch.bfloat16, trust_remote_code=True,
+        device_map="cpu"
     )
     state_dict = tmp_model.state_dict()
     llm_model.load_weights(state_dict.items())
@@ -267,7 +268,17 @@ def train(args):
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    policy_device = torch.device(args.device)
+    # Set CUDA_VISIBLE_DEVICES BEFORE any CUDA initialization
+    # Parse device indices (e.g., args.device="cuda:0", args.eval_device="cuda:1" → GPUs 0,1)
+    policy_gpu_idx = int(args.device.split(":")[-1])
+    eval_gpu_idx = int(args.eval_device.split(":")[-1])
+    os.environ["CUDA_VISIBLE_DEVICES"] = f"{policy_gpu_idx},{eval_gpu_idx}"
+    print(f"[CUDA] Set CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']}")
+    
+    # After setting CUDA_VISIBLE_DEVICES, use remapped indices (0 for policy, 1 for eval)
+    policy_device = torch.device("cuda:0")
+    eval_device = "cuda:1"
+    
     output_dir    = Path(args.output_dir) / args.run_name
     output_dir.mkdir(parents=True, exist_ok=True)
     sync_dir = str(output_dir / "_ckpt_sync")
@@ -302,7 +313,7 @@ def train(args):
     ).to(policy_device)
 
     # ---- vLLM engine ----
-    llm = init_vllm(args.model_name, args.eval_device)
+    llm = init_vllm(args.model_name)
 
     # ---- DataLoaders ----
     collate = make_collate_fn(tokenizer, args.max_seq_len)
