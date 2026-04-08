@@ -382,8 +382,8 @@ def grpo_train(
         ]
         data_idx = (data_idx + n_prompts_per_rollout) % len(train_examples)
 
-prompts = [build_prompt(ex, prompt_template) for ex in batch_examples]
-    ground_truths = [build_ground_truth(ex) for ex in batch_examples]
+        prompts = [build_prompt(ex, prompt_template) for ex in batch_examples]
+        ground_truths = [build_ground_truth(ex) for ex in batch_examples]
 
         rollout_responses = generate_rollouts(
             llm=llm, prompts=prompts, group_size=group_size,
