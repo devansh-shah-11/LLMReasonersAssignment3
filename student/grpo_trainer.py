@@ -181,6 +181,7 @@ def init_vllm(model_id: str, device: str, seed: int,
     from vllm.model_executor import set_random_seed as vllm_set_random_seed
 
     vllm_set_random_seed(seed)
+    gpu_id = int(device.split(":")[-1])
 
     world_size_patch = patch("torch.distributed.get_world_size", return_value=1)
     profiling_patch = patch(
@@ -190,12 +191,14 @@ def init_vllm(model_id: str, device: str, seed: int,
     with world_size_patch, profiling_patch:
         llm = LLM(
             model=model_id,
-            device=device,
+            device=f"cuda:{gpu_id}",
             dtype="bfloat16",
             enable_prefix_caching=True,
             gpu_memory_utilization=gpu_memory_utilization,
-            tensor_parallel_size=1,  # single GPU
-            disable_log_stats=True,  # quieter on HPC
+            tensor_parallel_size=1,
+            disable_log_stats=True,
+            trust_remote_code=True,
+            enforce_eager=False,
         )
     return llm
 
