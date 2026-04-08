@@ -105,7 +105,7 @@ def build_prompt(example: dict, prompt_template: str) -> str:
     static preamble if no placeholders are found.
     """
     numbers_str = str(example["numbers"])
-    target_str  = str(example["target"])
+    target_str = str(example["target"])
 
     if "{numbers}" in prompt_template and "{target}" in prompt_template:
         return prompt_template.format(numbers=numbers_str, target=target_str)
@@ -151,9 +151,9 @@ def countdown_reward_fn(response: str, ground_truth: str) -> dict[str, float]:
             if eq_matches:
                 result = float(eq_matches[-1])
             else:
-                expr  = re.sub(r"Step\s*\d+\s*:", "", answer_text)
+                expr = re.sub(r"Step\s*\d+\s*:", "", answer_text)
                 lines = [l.strip() for l in expr.splitlines() if l.strip()]
-                last  = lines[-1] if lines else expr
+                last = lines[-1] if lines else expr
                 if "=" in last:
                     last = last.split("=")[0].strip()
                 result = float(eval(last, {"__builtins__": {}}))
@@ -183,7 +183,7 @@ def init_vllm(model_id: str, device: str, seed: int,
     vllm_set_random_seed(seed)
 
     world_size_patch = patch("torch.distributed.get_world_size", return_value=1)
-    profiling_patch  = patch(
+    profiling_patch = patch(
         "vllm.worker.worker.Worker._assert_memory_footprint_increased_during_profiling",
         return_value=None,
     )
@@ -203,7 +203,7 @@ def init_vllm(model_id: str, device: str, seed: int,
 def load_policy_into_vllm_instance(policy: PreTrainedModel, llm) -> None:
     """Sync policy weights into the vLLM executor in-place (no extra VRAM)."""
     state_dict = policy.state_dict()
-    llm_model  = llm.llm_engine.model_executor.driver_worker.model_runner.model
+    llm_model = llm.llm_engine.model_executor.driver_worker.model_runner.model
     llm_model.load_weights(state_dict.items())
 
 
@@ -223,7 +223,7 @@ def generate_rollouts(
     from vllm import SamplingParams
 
     repeated = [p for p in prompts for _ in range(group_size)]
-    params   = SamplingParams(
+    params = SamplingParams(
         temperature=temperature,
         max_tokens=max_tokens,
         min_tokens=min_tokens,
@@ -240,13 +240,13 @@ def evaluate(llm, examples: list[dict], prompt_template: str,
     """Greedy evaluation on first n_eval validation examples."""
     from vllm import SamplingParams
 
-    subset  = examples[:n_eval]
+    subset = examples[:n_eval]
     prompts = [build_prompt(ex, prompt_template) for ex in subset]
-    gts     = [build_ground_truth(ex)            for ex in subset]
+    gts = [build_ground_truth(ex) for ex in subset]
 
-    params    = SamplingParams(temperature=0.0, max_tokens=max_tokens,
-                               stop=["</answer>"], include_stop_str_in_output=True)
-    outputs   = llm.generate(prompts, sampling_params=params)
+    params = SamplingParams(temperature=0.0, max_tokens=max_tokens,
+                            stop=["</answer>"], include_stop_str_in_output=True)
+    outputs = llm.generate(prompts, sampling_params=params)
     responses = [out.outputs[0].text for out in outputs]
 
     totals = {"reward": 0.0, "format_reward": 0.0, "answer_reward": 0.0}
@@ -266,33 +266,33 @@ def evaluate(llm, examples: list[dict], prompt_template: str,
 def grpo_train(
     data_path: str,
     prompt_file: str,
-    model_id: str       = "Qwen/Qwen2.5-Math-1.5B-Instruct",
-    output_dir: str     = "./grpo_output",
-    policy_device: str  = "cuda:0",
-    vllm_device: str    = "cuda:1",
-    seed: int           = 42,
+    model_id: str = "Qwen/Qwen2.5-Math-1.5B-Instruct",
+    output_dir: str = "./grpo_output",
+    policy_device: str = "cuda:0",
+    vllm_device: str = "cuda:1",
+    seed: int = 42,
     # Algorithm
-    n_grpo_steps: int                = 200,
-    learning_rate: float             = 1e-5,
-    advantage_eps: float             = 1e-6,
-    rollout_batch_size: int          = 16,
-    group_size: int                  = 8,
-    sampling_temperature: float      = 0.7,
-    sampling_min_tokens: int         = 4,
-    sampling_max_tokens: int         = 1024,
-    epochs_per_rollout_batch: int    = 1,
-    train_batch_size: int            = 64,
+    n_grpo_steps: int = 200,
+    learning_rate: float = 1e-5,
+    advantage_eps: float = 1e-6,
+    rollout_batch_size: int = 16,
+    group_size: int = 8,
+    sampling_temperature: float = 0.7,
+    sampling_min_tokens: int = 4,
+    sampling_max_tokens: int = 1024,
+    epochs_per_rollout_batch: int = 1,
+    train_batch_size: int = 64,
     gradient_accumulation_steps: int = 128,
-    gpu_memory_utilization: float    = 0.80,
+    gpu_memory_utilization: float = 0.80,
     loss_type: Literal[
         "no_baseline", "reinforce_with_baseline", "grpo_clip"
-    ]                                = "reinforce_with_baseline",
-    use_std_normalization: bool      = True,
-    cliprange: float                 = 0.2,
+    ] = "reinforce_with_baseline",
+    use_std_normalization: bool = True,
+    cliprange: float = 0.2,
     # Eval / logging
-    eval_every: int       = 10,
-    n_eval_examples: int  = 256,
-    wandb_project: str    = "grpo-countdown",
+    eval_every: int = 10,
+    n_eval_examples: int = 256,
+    wandb_project: str = "grpo-countdown",
     n_sample_rollouts: int = 3,
 ):
     torch.manual_seed(seed)
@@ -382,8 +382,8 @@ def grpo_train(
         ]
         data_idx = (data_idx + n_prompts_per_rollout) % len(train_examples)
 
-        prompts       = [build_prompt(ex, prompt_template) for ex in batch_examples]
-        ground_truths = [build_ground_truth(ex)             for ex in batch_examples]
+prompts = [build_prompt(ex, prompt_template) for ex in batch_examples]
+    ground_truths = [build_ground_truth(ex) for ex in batch_examples]
 
         rollout_responses = generate_rollouts(
             llm=llm, prompts=prompts, group_size=group_size,
@@ -391,8 +391,8 @@ def grpo_train(
             max_tokens=sampling_max_tokens, min_tokens=sampling_min_tokens,
         )
 
-        repeated_prompts = [p for p in prompts       for _ in range(group_size)]
-        repeated_gts     = [g for g in ground_truths for _ in range(group_size)]
+        repeated_prompts = [p for p in prompts for _ in range(group_size)]
+        repeated_gts = [g for g in ground_truths for _ in range(group_size)]
 
         # ---- Phase 2: Advantages ---------------------------------------- #
         advantages, raw_rewards, reward_meta = compute_group_normalized_rewards(
@@ -444,11 +444,11 @@ def grpo_train(
             for mi in range(n_micro):
                 idx = perm[mi * micro_bs : (mi + 1) * micro_bs]
 
-                mb_ids    = all_input_ids[idx].to(policy_device)
+                mb_ids = all_input_ids[idx].to(policy_device)
                 mb_labels = all_labels[idx].to(policy_device)
-                mb_mask   = all_resp_mask[idx].to(policy_device)
-                mb_adv    = adv_col[idx]
-                mb_rwd    = rwd_col[idx]
+                mb_mask = all_resp_mask[idx].to(policy_device)
+                mb_adv = adv_col[idx]
+                mb_rwd = rwd_col[idx]
                 mb_old_lp = (old_log_probs_all[idx]
                              if old_log_probs_all is not None else None)
 
@@ -456,7 +456,7 @@ def grpo_train(
                     model=policy, input_ids=mb_ids, labels=mb_labels,
                     return_token_entropy=True,
                 )
-                policy_lp   = lp_out["log_probs"]
+                policy_lp = lp_out["log_probs"]
                 tok_entropy = lp_out["token_entropy"]
 
                 scaled_loss, meta = grpo_microbatch_train_step(
@@ -473,7 +473,7 @@ def grpo_train(
 
                 with torch.no_grad():
                     mask_f = mb_mask.float()
-                    n_tok  = mask_f.sum().clamp(min=1)
+                    n_tok = mask_f.sum().clamp(min=1)
                     agg_entropy += ((tok_entropy * mask_f).sum() / n_tok).item()
                 if "clip_fraction" in meta:
                     agg_clip += meta["clip_fraction"].item()
@@ -484,12 +484,12 @@ def grpo_train(
 
             train_step += 1
             log = {
-                "train/loss":          agg_loss,
-                "train/grad_norm":     grad_norm.item(),
+                "train/loss": agg_loss,
+                "train/grad_norm": grad_norm.item(),
                 "train/token_entropy": agg_entropy / n_micro,
-                "train/mean_reward":   reward_meta["mean_raw_reward"],
-                "train/max_reward":    reward_meta["max_raw_reward"],
-                "train_step":          train_step,
+                "train/mean_reward": reward_meta["mean_raw_reward"],
+                "train/max_reward": reward_meta["max_raw_reward"],
+                "train_step": train_step,
             }
             if loss_type == "grpo_clip":
                 log["train/clip_fraction"] = agg_clip / n_micro
@@ -514,9 +514,9 @@ def grpo_train(
 
             print(f"\n  === Sample rollouts (step {grpo_step}) ===")
             for i in range(min(n_sample_rollouts, len(rollout_responses))):
-                gt   = repeated_gts[i]
+                gt = repeated_gts[i]
                 resp = rollout_responses[i]
-                rwd  = countdown_reward_fn(resp, gt)
+                rwd = countdown_reward_fn(resp, gt)
                 print(f"  [{i}] GT={gt}")
                 print(f"       resp[:300]: {resp[:300]!r}")
                 print(f"       reward={rwd}\n")
@@ -542,44 +542,44 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="GRPO training on Countdown")
 
     # Paths
-    parser.add_argument("--data_path",   type=str,
+    parser.add_argument("--data_path", type=str,
                         default="/scratch/dns5508/dataset/countdown")
     parser.add_argument("--prompt_file", type=str,
                         default="student/prompts/countdown.prompt")
-    parser.add_argument("--model_id",    type=str,
+    parser.add_argument("--model_id", type=str,
                         default="Qwen/Qwen2.5-Math-1.5B-Instruct")
-    parser.add_argument("--output_dir",  type=str, default="./grpo_output")
+    parser.add_argument("--output_dir", type=str, default="./grpo_output")
 
     # Devices
     parser.add_argument("--policy_device", type=str, default="cuda:0")
-    parser.add_argument("--vllm_device",   type=str, default="cuda:1")
+    parser.add_argument("--vllm_device", type=str, default="cuda:1")
 
     # Algorithm
-    parser.add_argument("--n_grpo_steps",               type=int,   default=200)
-    parser.add_argument("--learning_rate",               type=float, default=1e-5)
-    parser.add_argument("--rollout_batch_size",          type=int,   default=16)
-    parser.add_argument("--group_size",                  type=int,   default=8)
-    parser.add_argument("--train_batch_size",            type=int,   default=64)
-    parser.add_argument("--gradient_accumulation_steps", type=int,   default=128)
-    parser.add_argument("--epochs_per_rollout_batch",    type=int,   default=1)
-    parser.add_argument("--sampling_temperature",        type=float, default=0.7)
-    parser.add_argument("--sampling_max_tokens",         type=int,   default=1024)
-    parser.add_argument("--sampling_min_tokens",         type=int,   default=4)
+    parser.add_argument("--n_grpo_steps", type=int, default=200)
+    parser.add_argument("--learning_rate", type=float, default=1e-5)
+    parser.add_argument("--rollout_batch_size", type=int, default=16)
+    parser.add_argument("--group_size", type=int, default=8)
+    parser.add_argument("--train_batch_size", type=int, default=64)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=128)
+    parser.add_argument("--epochs_per_rollout_batch", type=int, default=1)
+    parser.add_argument("--sampling_temperature", type=float, default=0.7)
+    parser.add_argument("--sampling_max_tokens", type=int, default=1024)
+    parser.add_argument("--sampling_min_tokens", type=int, default=4)
     parser.add_argument("--loss_type", type=str,
                         default="reinforce_with_baseline",
-                        choices=["no_baseline","reinforce_with_baseline","grpo_clip"])
-    parser.add_argument("--use_std_normalization",  action="store_true",  default=True)
-    parser.add_argument("--no_std_normalization",   dest="use_std_normalization",
+                        choices=["no_baseline", "reinforce_with_baseline", "grpo_clip"])
+    parser.add_argument("--use_std_normalization", action="store_true", default=True)
+    parser.add_argument("--no_std_normalization", dest="use_std_normalization",
                         action="store_false")
-    parser.add_argument("--cliprange",     type=float, default=0.2)
+    parser.add_argument("--cliprange", type=float, default=0.2)
     parser.add_argument("--advantage_eps", type=float, default=1e-6)
 
     # Eval / logging
-    parser.add_argument("--eval_every",             type=int,   default=10)
-    parser.add_argument("--n_eval_examples",        type=int,   default=256)
+    parser.add_argument("--eval_every", type=int, default=10)
+    parser.add_argument("--n_eval_examples", type=int, default=256)
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.80)
-    parser.add_argument("--wandb_project",          type=str,   default="grpo-countdown")
-    parser.add_argument("--seed",                   type=int,   default=42)
+    parser.add_argument("--wandb_project", type=str, default="grpo-countdown")
+    parser.add_argument("--seed", type=int, default=42)
 
     args = parser.parse_args()
     grpo_train(**vars(args))
