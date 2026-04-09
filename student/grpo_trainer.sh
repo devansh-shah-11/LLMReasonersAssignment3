@@ -4,7 +4,7 @@
 #SBATCH --partition=c24m170-a100-2 
 #SBATCH --output=./logs/%j_%x.out
 #SBATCH --error=./logs/%j_%x.err
-#SBATCH --time=06:00:00
+#SBATCH --time=02:30:00
 #SBATCH --gres=gpu:a100:2
 #SBATCH --requeue
 
