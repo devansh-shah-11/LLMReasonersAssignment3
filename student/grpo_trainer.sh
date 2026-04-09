@@ -36,7 +36,7 @@ source /ext3/miniconda3/etc/profile.d/conda.sh
 export PATH=/home/dns5508/.local/bin:\$PATH
 conda activate llmr
 cd /scratch/dns5508/LLMReasonersAssignment3
-python3 -m student/grpo_trainer \
+python3 student/grpo_trainer \
   --data_path "$DATASET_DIR" \
   --prompt_file "$PROMPT_FILE" \
   --output_dir "$OUTPUT_DIR" \
