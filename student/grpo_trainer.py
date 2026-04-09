@@ -296,6 +296,7 @@ def grpo_train(
     eval_every: int = 10,
     n_eval_examples: int = 256,
     wandb_project: str = "grpo-countdown",
+    wandb_run_name: str | None = None,
     n_sample_rollouts: int = 3,
 ):
     torch.manual_seed(seed)
@@ -324,6 +325,7 @@ def grpo_train(
     # ---- W&B ------------------------------------------------------------- #
     wandb.init(
         project=wandb_project,
+        name=wandb_run_name,
         config=dict(
             model_id=model_id, n_grpo_steps=n_grpo_steps,
             learning_rate=learning_rate, rollout_batch_size=rollout_batch_size,
@@ -581,6 +583,7 @@ if __name__ == "__main__":
     parser.add_argument("--n_eval_examples", type=int, default=256)
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.80)
     parser.add_argument("--wandb_project", type=str, default="grpo-countdown")
+    parser.add_argument("--wandb_run_name", type=str, default=None)
     parser.add_argument("--seed", type=int, default=42)
 
     args = parser.parse_args()
