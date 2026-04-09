@@ -28,19 +28,18 @@ echo "Output: $OUTPUT_DIR"
 echo "=============================="
 
 # Run GRPO training (using default hyperparameters)
-python3 -m student.grpo_trainer \
+singularity exec --bind /scratch --nv \
+--overlay /scratch/dns5508/env/another__overlay-25GB-500K.ext3:ro \
+/scratch/dns5508/ubuntu-20.04.3.sif \
+/bin/bash -c "
+source /ext3/miniconda3/etc/profile.d/conda.sh
+export PATH=/home/dns5508/.local/bin:\$PATH
+conda activate llmr
+cd /scratch/dns5508/LLMReasonersAssignment3
+python3 -m student/grpo_trainer \
   --data_path "$DATASET_DIR" \
   --prompt_file "$PROMPT_FILE" \
   --output_dir "$OUTPUT_DIR" \
   --policy_device cuda:0 \
   --vllm_device cuda:1
-
-STATUS=$?
-
-if [ $STATUS -eq 0 ]; then
-    echo "✅ GRPO training completed successfully"
-else
-    echo "❌ GRPO training failed with exit code $STATUS"
-fi
-
-exit $STATUS
+"
