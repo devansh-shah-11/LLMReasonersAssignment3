@@ -285,7 +285,7 @@ def grpo_train(
     sampling_max_tokens: int = 1024,
     epochs_per_rollout_batch: int = 1,
     train_batch_size: int = 64,
-    gradient_accumulation_steps: int = 128,
+    gradient_accumulation_steps: int = 4,
     gpu_memory_utilization: float = 0.80,
     loss_type: Literal[
         "no_baseline", "reinforce_with_baseline", "grpo_clip"
@@ -563,7 +563,7 @@ if __name__ == "__main__":
     parser.add_argument("--rollout_batch_size", type=int, default=16)
     parser.add_argument("--group_size", type=int, default=8)
     parser.add_argument("--train_batch_size", type=int, default=64)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=128)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
     parser.add_argument("--epochs_per_rollout_batch", type=int, default=1)
     parser.add_argument("--sampling_temperature", type=float, default=0.7)
     parser.add_argument("--sampling_max_tokens", type=int, default=1024)
