@@ -349,7 +349,6 @@ def grpo_train(
     policy = AutoModelForCausalLM.from_pretrained(
         model_id,
         torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
     ).to(policy_device)
 
     tokenizer = AutoTokenizer.from_pretrained(model_id)
