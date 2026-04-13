@@ -7,6 +7,8 @@
 #SBATCH --time=01:00:00
 #SBATCH --gres=gpu:a100:2
 #SBATCH --requeue
+#SBATCH --mail-user=dns5508@nyu.edu
+#SBATCH --mail-type=all
 
 # Configuration
 DATASET_DIR="/scratch/dns5508/dataset/countdown"

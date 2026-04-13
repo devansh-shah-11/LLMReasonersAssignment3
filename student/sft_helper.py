@@ -335,9 +335,11 @@ def grpo_microbatch_train_step(
     advantages: torch.Tensor | None = None,
     old_log_probs: torch.Tensor | None = None,
     cliprange: float | None = None,
+    use_length_normalize: bool = False,
+    max_gen_len: int | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """One GRPO microbatch forward+backward pass.
-    
+
     Args:
         policy_log_probs: (batch_size, sequence_length)
         response_mask: (batch_size, sequence_length), mask for response tokens
@@ -347,7 +349,11 @@ def grpo_microbatch_train_step(
         advantages: (batch_size, 1) for other loss types
         old_log_probs: (batch_size, sequence_length) for grpo_clip
         cliprange: float for grpo_clip
-    
+        use_length_normalize: if True, divide per-sequence loss sum by max_gen_len
+            (masked_normalize); otherwise use global masked_mean over all response tokens.
+        max_gen_len: the normalizer constant when use_length_normalize=True
+            (typically sampling_max_tokens).
+
     Returns:
         tuple[torch.Tensor, dict]: (scaled_loss, metadata)
     """
@@ -360,19 +366,24 @@ def grpo_microbatch_train_step(
         old_log_probs=old_log_probs,
         cliprange=cliprange,
     )
-    
-    # Mask the loss: only count response tokens
-    # response_mask is boolean, convert to float
+
     response_mask_float = response_mask.float()
-    masked_loss = loss * response_mask_float
-    
-    # Compute mean loss over batch and sequence, only where mask=1
-    total_masked = masked_loss.sum()
-    num_masked = response_mask_float.sum()
-    final_loss = total_masked / num_masked
-    
+
+    if use_length_normalize:
+        # Sum per sequence, divide by max_gen_len, then mean over batch.
+        # Equivalent to masked_normalize(loss, mask, normalize_constant=max_gen_len, dim=1).mean()
+        assert max_gen_len is not None and max_gen_len > 0, \
+            "max_gen_len must be provided and > 0 when use_length_normalize=True"
+        per_seq_loss = (loss * response_mask_float).sum(dim=1) / max_gen_len
+        final_loss = per_seq_loss.mean()
+    else:
+        # Global masked mean: sum all masked token losses / number of masked tokens
+        total_masked = (loss * response_mask_float).sum()
+        num_masked = response_mask_float.sum().clamp(min=1)
+        final_loss = total_masked / num_masked
+
     # Scale for gradient accumulation
     scaled_loss = final_loss / gradient_accumulation_steps
     scaled_loss.backward()
-    
+
     return scaled_loss, metadata

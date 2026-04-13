@@ -292,6 +292,7 @@ def grpo_train(
     ] = "reinforce_with_baseline",
     use_std_normalization: bool = True,
     cliprange: float = 0.2,
+    use_length_normalize: bool = False,
     # Eval / logging
     eval_every: int = 10,
     n_eval_examples: int = 256,
@@ -333,6 +334,7 @@ def grpo_train(
             gradient_accumulation_steps=gradient_accumulation_steps,
             loss_type=loss_type, use_std_normalization=use_std_normalization,
             epochs_per_rollout_batch=epochs_per_rollout_batch,
+            use_length_normalize=use_length_normalize,
         ),
     )
     wandb.define_metric("train_step")
@@ -472,6 +474,8 @@ def grpo_train(
                     advantages=mb_adv,
                     old_log_probs=mb_old_lp,
                     cliprange=cliprange,
+                    use_length_normalize=use_length_normalize,
+                    max_gen_len=sampling_max_tokens,
                 )
                 agg_loss += scaled_loss.item()
 
@@ -577,6 +581,7 @@ if __name__ == "__main__":
                         action="store_false")
     parser.add_argument("--cliprange", type=float, default=0.2)
     parser.add_argument("--advantage_eps", type=float, default=1e-6)
+    parser.add_argument("--use_length_normalize", action="store_true", default=False)
 
     # Eval / logging
     parser.add_argument("--eval_every", type=int, default=10)
