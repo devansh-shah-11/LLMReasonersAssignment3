@@ -43,17 +43,8 @@ python3 student/grpo_trainer.py \
   --output_dir "$OUTPUT_DIR" \
   --policy_device cuda:0 \
   --vllm_device cuda:1 \
-  --learning_rate 1e-4 \
-  --wandb_run_name lr_1e-4
-
-python3 student/grpo_trainer.py \
-  --data_path "$DATASET_DIR" \
-  --prompt_file "$PROMPT_FILE" \
-  --output_dir "$OUTPUT_DIR" \
-  --policy_device cuda:0 \
-  --vllm_device cuda:1 \
-  --learning_rate 5e-4 \
-  --wandb_run_name lr_5e-4
+  --learning_rate 1e-6 \
+  --wandb_run_name lr_1e-6
 
 python3 student/grpo_trainer.py \
   --data_path "$DATASET_DIR" \
