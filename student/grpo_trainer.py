@@ -317,6 +317,12 @@ def grpo_train(
         assert loss_type == "grpo_clip", \
             "Off-policy training requires loss_type='grpo_clip'"
 
+    run_suffix_parts = [f"lr{learning_rate}", f"loss{loss_type}"]
+    if use_length_normalize:
+        run_suffix_parts.append("lenorm")
+    if args.wandb_run_name is not None:
+        run_suffix_parts.append(args.wandb_run_name)
+    output_dir = os.path.join(output_dir, "_".join(run_suffix_parts))
     os.makedirs(output_dir, exist_ok=True)
 
     # ---- Prompt ---------------------------------------------------------- #

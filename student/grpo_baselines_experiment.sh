@@ -4,21 +4,11 @@
 #SBATCH --partition=c24m170-a100-2
 #SBATCH --output=./logs/%j_%x.out
 #SBATCH --error=./logs/%j_%x.err
-#SBATCH --time=01:30:00
+#SBATCH --time=00:45:00
 #SBATCH --gres=gpu:a100:2
 #SBATCH --requeue
 #SBATCH --mail-user=dns5508@nyu.edu
 #SBATCH --mail-type=all
-
-# ============================================================
-# Experiment: Effect of Baselines
-# Compares:
-#   (1) reinforce_with_baseline  -- group-normalized advantage
-#   (2) no_baseline              -- raw reward, no centering
-#
-# Best LR from sweep: 5e-5 (fixed for all subsequent experiments).
-# All other hyperparams use trainer defaults.
-# ============================================================
 
 BEST_LR=5e-5
 
@@ -37,9 +27,7 @@ export PATH=/home/dns5508/.local/bin:\$PATH
 conda activate llmr
 cd /scratch/dns5508/LLMReasonersAssignment3
 
-echo '=============================='
-echo 'Run 1/2: reinforce_with_baseline'
-echo '=============================='
+echo 'Run: reinforce_with_baseline'
 python3 student/grpo_trainer.py \
   --data_path $DATASET_DIR \
   --prompt_file $PROMPT_FILE \
@@ -49,8 +37,7 @@ python3 student/grpo_trainer.py \
   --wandb_run_name baseline_reinforce_with_baseline
 
 echo '=============================='
-echo 'Run 2/2: no_baseline'
-echo '=============================='
+echo 'Run: no_baseline'
 python3 student/grpo_trainer.py \
   --data_path $DATASET_DIR \
   --prompt_file $PROMPT_FILE \
