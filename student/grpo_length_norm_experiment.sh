@@ -40,6 +40,16 @@ export PATH=/home/dns5508/.local/bin:\$PATH
 conda activate llmr
 cd /scratch/dns5508/LLMReasonersAssignment3
 
+echo 'Warming up CUDA kernels...'
+python3 student/grpo_trainer.py \
+  --data_path $DATASET_DIR \
+  --prompt_file $PROMPT_FILE \
+  --learning_rate $BEST_LR \
+  --loss_type reinforce_with_baseline \
+  --n_grpo_steps 20 \
+  --output_dir ${BASE_OUTPUT_DIR}/warmup_discard \
+  --wandb_project grpo-warmup-discard
+
 echo '=============================='
 echo 'Run 1/2: masked_mean (default)'
 echo '=============================='
