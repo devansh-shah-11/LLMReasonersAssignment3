@@ -41,5 +41,12 @@ python3 student/grpo_trainer.py \
   --prompt_file "$PROMPT_FILE" \
   --output_dir "$OUTPUT_DIR" \
   --policy_device cuda:0 \
-  --vllm_device cuda:1
+  --vllm_device cuda:1 \
+  --rollout_batch_size 16 \
+  --group_size 8 \
+  --train_batch_size 16 \
+  --gradient_accumulation_steps 8 \
+  --epochs_per_rollout_batch 1 \
+  --gpu_memory_utilization 0.85 \
+  --wandb_run_name "$RUN_NAME"
 "
