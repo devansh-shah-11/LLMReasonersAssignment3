@@ -177,7 +177,7 @@ def compute_group_normalized_rewards(
         group_mean = group_rewards.mean()
         
         if normalize_by_std:
-            group_std = group_rewards.std() + advantage_eps
+            group_std = group_rewards.std(unbiased=False) + advantage_eps
             normalized = (group_rewards - group_mean) / group_std
         else:
             normalized = group_rewards - group_mean
@@ -307,19 +307,19 @@ def masked_mean(tensor: torch.Tensor, mask: torch.Tensor, dim: int | None = None
         dim: int | None, dimension to reduce. If None, computes global mean.
     
     Returns:
-        torch.Tensor, the masked mean (NaN where mask is all zeros)
+        torch.Tensor, the masked mean (0 where mask is all zeros)
     """
     masked = tensor * mask
     
     if dim is None:
         # Global mean
         masked_sum = masked.sum()
-        mask_count = mask.sum()
+        mask_count = mask.sum().clamp(min=1)
         result = masked_sum / mask_count
     else:
         # Reduce along specified dimension
         masked_sum = masked.sum(dim=dim, keepdim=True)
-        mask_count = mask.sum(dim=dim, keepdim=True)
+        mask_count = mask.sum(dim=dim, keepdim=True).clamp(min=1)
         result = masked_sum / mask_count
         result = result.squeeze(dim)
     
@@ -368,6 +368,15 @@ def grpo_microbatch_train_step(
     )
 
     response_mask_float = response_mask.float()
+
+    # Fix clip_fraction: the value from compute_grpo_clip_loss averages over all
+    # positions including padding. Recompute here where we have response_mask.
+    if "clip_fraction" in metadata and old_log_probs is not None:
+        log_ratio = policy_log_probs - old_log_probs
+        ratio = torch.exp(log_ratio)
+        is_clipped = (ratio < (1 - cliprange)) | (ratio > (1 + cliprange))
+        n_response_tokens = response_mask_float.sum().clamp(min=1)
+        metadata["clip_fraction"] = (is_clipped.float() * response_mask_float).sum() / n_response_tokens
 
     if use_length_normalize:
         # Sum per sequence, divide by max_gen_len, then mean over batch.

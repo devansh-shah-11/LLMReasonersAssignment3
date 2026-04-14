@@ -452,7 +452,6 @@ def grpo_train(
 
             grad_norm = nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
             optimizer.step()
-            optimizer.zero_grad()
 
             train_step += 1
             log = {
