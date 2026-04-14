@@ -259,7 +259,7 @@ def grpo_train(
     # Eval / logging
     eval_every: int = 10,
     n_eval_examples: int = 256,
-    wandb_project: str = "grpo-countdown",
+    wandb_project: str = "grpo-countdownv2",
     wandb_run_name: str | None = None,
     n_sample_rollouts: int = 3,
 ):
@@ -544,7 +544,7 @@ if __name__ == "__main__":
     parser.add_argument("--eval_every", type=int, default=10)
     parser.add_argument("--n_eval_examples", type=int, default=256)
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.80)
-    parser.add_argument("--wandb_project", type=str, default="grpo-countdown")
+    parser.add_argument("--wandb_project", type=str, default="grpo-countdownv2")
     parser.add_argument("--wandb_run_name", type=str, default=None)
     parser.add_argument("--seed", type=int, default=42)
 
