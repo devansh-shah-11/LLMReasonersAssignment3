@@ -259,6 +259,7 @@ def grpo_train(
     # Eval / logging
     eval_every: int = 10,
     n_eval_examples: int = 256,
+    n_test_examples: int = 256,
     wandb_project: str = "grpo-countdownv2",
     wandb_run_name: str | None = None,
     n_sample_rollouts: int = 3,
@@ -283,8 +284,8 @@ def grpo_train(
     run_suffix_parts = [f"lr{learning_rate}", f"loss{loss_type}"]
     if use_length_normalize:
         run_suffix_parts.append("lenorm")
-    if args.wandb_run_name is not None:
-        run_suffix_parts.append(args.wandb_run_name)
+    if wandb_run_name is not None:
+        run_suffix_parts.append(wandb_run_name)
     output_dir = os.path.join(output_dir, "_".join(run_suffix_parts))
     os.makedirs(output_dir, exist_ok=True)
 
@@ -312,7 +313,8 @@ def grpo_train(
     print("[data] Loading datasets...")
     train_examples = load_countdown_dataset(data_path, "train")
     val_examples   = load_countdown_dataset(data_path, "dev")
-    print(f"[data] train={len(train_examples)}, dev={len(val_examples)}")
+    test_examples  = load_countdown_dataset(data_path, "test")
+    print(f"[data] train={len(train_examples)}, dev={len(val_examples)}, test={len(test_examples)}")
 
     print(f"[model] Loading: {model_id}")
     policy = AutoModelForCausalLM.from_pretrained(
@@ -496,6 +498,19 @@ def grpo_train(
               f"mean_rwd={reward_meta['mean_raw_reward']:.3f}  "
               f"grad={grad_norm.item():.3f}")
 
+    # ---- Final test set evaluation -------------------------------------- #
+    print(f"\n[test] Evaluating on test set ({n_test_examples} examples)...")
+    load_policy_into_vllm_instance(policy, llm)
+    test_metrics = evaluate(
+        llm=llm, examples=test_examples,
+        prompt_template=prompt_template,
+        n_eval=n_test_examples, max_tokens=sampling_max_tokens,
+    )
+    test_metrics_logged = {f"test/{k.split('/')[-1]}": v for k, v in test_metrics.items()}
+    wandb.log(test_metrics_logged)
+    print(f"  [test] answer_reward={test_metrics['eval/answer_reward']:.3f}  "
+          f"format_reward={test_metrics['eval/format_reward']:.3f}")
+
     print(f"\n[done] Saving to {output_dir}")
     policy.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
@@ -543,6 +558,7 @@ if __name__ == "__main__":
     # Eval / logging
     parser.add_argument("--eval_every", type=int, default=10)
     parser.add_argument("--n_eval_examples", type=int, default=256)
+    parser.add_argument("--n_test_examples", type=int, default=256)
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.80)
     parser.add_argument("--wandb_project", type=str, default="grpo-countdownv2")
     parser.add_argument("--wandb_run_name", type=str, default=None)
