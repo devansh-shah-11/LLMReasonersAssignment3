@@ -374,8 +374,7 @@ def grpo_microbatch_train_step(
         # Equivalent to masked_normalize(loss, mask, normalize_constant=max_gen_len, dim=1).mean()
         assert max_gen_len is not None and max_gen_len > 0, \
             "max_gen_len must be provided and > 0 when use_length_normalize=True"
-        per_seq_loss = (loss * response_mask_float).sum(dim=1) / max_gen_len
-        final_loss = per_seq_loss.mean()
+        final_loss = masked_normalize(loss, response_mask_float, normalize_constant=max_gen_len, dim=1).mean()
     else:
         # masked_mean per sequence (dim=1), then mean over batch
         final_loss = masked_mean(loss, response_mask_float, dim=1).mean()
