@@ -76,22 +76,26 @@ def _normalise_df(df) -> list[dict]:
 def build_prompt(example: dict, prompt_template: str) -> str:
     """
     Fill the countdown prompt template.
-    Supports {numbers}/{target} placeholders, or appends the problem to a
-    static preamble if no placeholders are found.
+    Supports {question} placeholder (countdown.prompt style), or
+    {numbers}/{target} placeholders, or appends the problem as a fallback.
     """
     numbers_str = str(example["numbers"])
     target_str = str(example["target"])
 
+    problem = (
+        f"Using the numbers in the list {numbers_str}, "
+        f"create an equation that equals {target_str}. "
+        "You can use basic arithmetic operations (+, -, *, /) "
+        "and each number can only be used once."
+    )
+
+    if "{question}" in prompt_template:
+        return prompt_template.replace("{question}", problem)
+
     if "{numbers}" in prompt_template and "{target}" in prompt_template:
         return prompt_template.format(numbers=numbers_str, target=target_str)
 
-    problem = (
-        f"\nUsing the numbers in the list {numbers_str}, "
-        f"create an equation that equals {target_str}.\n"
-        "You can use basic arithmetic operations (+, -, *, /) "
-        "and each number can only be used once.\n"
-    )
-    return prompt_template.rstrip() + problem
+    return prompt_template.rstrip() + "\n\n" + problem
 
 
 def build_ground_truth(example: dict) -> str:
@@ -194,10 +198,10 @@ def generate_rollouts(
         max_tokens=max_tokens,
         min_tokens=min_tokens,
         stop=["</answer>"],
-        include_stop_str_in_output=True,
     )
     outputs = llm.generate(repeated, sampling_params=params)
-    return [out.outputs[0].text for out in outputs]
+    # Always append </answer> so the reward fn and tokenizer see the full response
+    return [out.outputs[0].text + "</answer>" for out in outputs]
 
 
 @torch.no_grad()
@@ -211,9 +215,9 @@ def evaluate(llm, examples: list[dict], prompt_template: str,
     gts = [build_ground_truth(ex) for ex in subset]
 
     params = SamplingParams(temperature=0.0, max_tokens=max_tokens,
-                            stop=["</answer>"], include_stop_str_in_output=True)
+                            stop=["</answer>"])
     outputs = llm.generate(prompts, sampling_params=params)
-    responses = [out.outputs[0].text for out in outputs]
+    responses = [out.outputs[0].text + "</answer>" for out in outputs]
 
     totals = {"reward": 0.0, "format_reward": 0.0, "answer_reward": 0.0}
     for resp, gt in zip(responses, gts):
