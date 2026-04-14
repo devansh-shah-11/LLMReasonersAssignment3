@@ -350,7 +350,7 @@ def grpo_microbatch_train_step(
         old_log_probs: (batch_size, sequence_length) for grpo_clip
         cliprange: float for grpo_clip
         use_length_normalize: if True, divide per-sequence loss sum by max_gen_len
-            (masked_normalize); otherwise use global masked_mean over all response tokens.
+            (masked_normalize); otherwise use masked_mean per sequence (dim=1), then mean over batch.
         max_gen_len: the normalizer constant when use_length_normalize=True
             (typically sampling_max_tokens).
 
@@ -377,10 +377,8 @@ def grpo_microbatch_train_step(
         per_seq_loss = (loss * response_mask_float).sum(dim=1) / max_gen_len
         final_loss = per_seq_loss.mean()
     else:
-        # Global masked mean: sum all masked token losses / number of masked tokens
-        total_masked = (loss * response_mask_float).sum()
-        num_masked = response_mask_float.sum().clamp(min=1)
-        final_loss = total_masked / num_masked
+        # masked_mean per sequence (dim=1), then mean over batch
+        final_loss = masked_mean(loss, response_mask_float, dim=1).mean()
 
     # Scale for gradient accumulation
     scaled_loss = final_loss / gradient_accumulation_steps
