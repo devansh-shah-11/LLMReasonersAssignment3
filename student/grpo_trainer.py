@@ -1,16 +1,3 @@
-"""
-GRPO Train Loop for Countdown dataset.
-
-Usage:
-    python grpo_train.py --data_path /scratch/dns5508/dataset/countdown \
-                         --prompt_file student/prompts/countdown.prompt
-
-Dataset formats supported (tried in order):
-  1. HuggingFace Arrow:  <data_path>/dataset/{train,dev,test}/
-  2. Parquet:            <data_path>/{split}.parquet
-  3. 10k parquet:        <data_path>/train_10k.parquet  (train only)
-"""
-
 import argparse
 import os
 import re
@@ -30,19 +17,11 @@ from student.sft_helper import (
     tokenize_prompt_and_output,
 )
 
-# ---------------------------------------------------------------------------
-# Prompt loading
-# ---------------------------------------------------------------------------
-
 def load_countdown_prompt(prompt_file: str) -> str:
     """Load the countdown prompt template from disk."""
     with open(prompt_file, "r") as f:
         return f.read()
 
-
-# ---------------------------------------------------------------------------
-# Dataset loading — handles both Arrow (HF) and Parquet formats
-# ---------------------------------------------------------------------------
 
 def load_countdown_dataset(data_path: str, split: str) -> list[dict]:
     """
@@ -94,10 +73,6 @@ def _normalise_df(df) -> list[dict]:
             for _, row in df.iterrows()]
 
 
-# ---------------------------------------------------------------------------
-# Prompt builder
-# ---------------------------------------------------------------------------
-
 def build_prompt(example: dict, prompt_template: str) -> str:
     """
     Fill the countdown prompt template.
@@ -124,10 +99,6 @@ def build_ground_truth(example: dict) -> str:
     nums = ",".join(str(n) for n in example["numbers"])
     return f"{example['target']}|{nums}"
 
-
-# ---------------------------------------------------------------------------
-# Reward function
-# ---------------------------------------------------------------------------
 
 def countdown_reward_fn(response: str, ground_truth: str) -> dict[str, float]:
     """
@@ -165,10 +136,6 @@ def countdown_reward_fn(response: str, ground_truth: str) -> dict[str, float]:
     reward = 0.1 * format_reward + 0.9 * answer_reward
     return {"reward": reward, "format_reward": format_reward, "answer_reward": answer_reward}
 
-
-# ---------------------------------------------------------------------------
-# vLLM helpers
-# ---------------------------------------------------------------------------
 
 def init_vllm(model_id: str, device: str, seed: int,
               gpu_memory_utilization: float = 0.85):
@@ -209,10 +176,6 @@ def load_policy_into_vllm_instance(policy: PreTrainedModel, llm) -> None:
     llm_model = llm.llm_engine.model_executor.driver_worker.model_runner.model
     llm_model.load_weights(state_dict.items())
 
-
-# ---------------------------------------------------------------------------
-# Rollout + evaluation
-# ---------------------------------------------------------------------------
 
 def generate_rollouts(
     llm,
@@ -261,10 +224,6 @@ def evaluate(llm, examples: list[dict], prompt_template: str,
     n = len(subset)
     return {f"eval/{k}": v / n for k, v in totals.items()}
 
-
-# ---------------------------------------------------------------------------
-# Main GRPO train loop
-# ---------------------------------------------------------------------------
 
 def grpo_train(
     data_path: str,
@@ -325,11 +284,9 @@ def grpo_train(
     output_dir = os.path.join(output_dir, "_".join(run_suffix_parts))
     os.makedirs(output_dir, exist_ok=True)
 
-    # ---- Prompt ---------------------------------------------------------- #
     prompt_template = load_countdown_prompt(prompt_file)
     print(f"[prompt] Loaded ({len(prompt_template)} chars) from {prompt_file}")
 
-    # ---- W&B ------------------------------------------------------------- #
     wandb.init(
         project=wandb_project,
         name=wandb_run_name,
@@ -348,13 +305,11 @@ def grpo_train(
     wandb.define_metric("train/*", step_metric="train_step")
     wandb.define_metric("eval/*",  step_metric="eval_step")
 
-    # ---- Datasets -------------------------------------------------------- #
     print("[data] Loading datasets...")
     train_examples = load_countdown_dataset(data_path, "train")
     val_examples   = load_countdown_dataset(data_path, "dev")
     print(f"[data] train={len(train_examples)}, dev={len(val_examples)}")
 
-    # ---- Policy model ---------------------------------------------------- #
     print(f"[model] Loading: {model_id}")
     policy = AutoModelForCausalLM.from_pretrained(
         model_id,
@@ -365,20 +320,17 @@ def grpo_train(
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    # ---- vLLM ------------------------------------------------------------ #
     print(f"[vllm] Initialising on {vllm_device} "
           f"(gpu_memory_utilization={gpu_memory_utilization}) ...")
     llm = init_vllm(model_id, device=vllm_device, seed=seed,
                     gpu_memory_utilization=gpu_memory_utilization)
     print("[vllm] Ready.")
 
-    # ---- Optimiser ------------------------------------------------------- #
     optimizer = torch.optim.AdamW(
         policy.parameters(), lr=learning_rate,
         weight_decay=0.0, betas=(0.9, 0.95),
     )
 
-    # ---- Training loop --------------------------------------------------- #
     data_idx = train_step = eval_step = 0
     print(f"\n[train] Starting GRPO — {n_grpo_steps} steps\n")
 
@@ -540,17 +492,12 @@ def grpo_train(
               f"mean_rwd={reward_meta['mean_raw_reward']:.3f}  "
               f"grad={grad_norm.item():.3f}")
 
-    # ---- Save ------------------------------------------------------------ #
     print(f"\n[done] Saving to {output_dir}")
     policy.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
     wandb.finish()
     print("[done] Complete.")
 
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="GRPO training on Countdown")
