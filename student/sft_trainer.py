@@ -219,18 +219,31 @@ def vllm_accuracy(
     llm: LLM,
     records: list[dict],
     max_new_tokens: int,
+    eos_token: str | None = None,
 ) -> float:
     prompts = [build_prompt_and_output(r)[0] for r in records]
     golds   = [r.get("ground_truth", "") for r in records]
 
+    stop = ["\n\n\n"]
+    if eos_token:
+        stop.append(eos_token)
+
     outputs = llm.generate(
         prompts,
-        SamplingParams(temperature=0.0, max_tokens=max_new_tokens, stop=["</s>", "\n\n\n"]),
+        SamplingParams(temperature=0.0, max_tokens=max_new_tokens, stop=stop),
     )
-    correct = sum(
-        is_correct(extract_answer(o.outputs[0].text), g)
-        for o, g in zip(outputs, golds)
-    )
+
+    correct = 0
+    n_fallback = 0
+    for o, g in zip(outputs, golds):
+        text = o.outputs[0].text
+        if _extract_boxed(text) is None:
+            n_fallback += 1
+        correct += is_correct(extract_answer(text), g)
+
+    if n_fallback > 0:
+        print(f"  [vllm_accuracy] used last-number fallback on {n_fallback}/{len(records)} examples")
+
     return correct / len(records)
 
 
@@ -426,7 +439,8 @@ def train(args):
                     model, eval_loader, policy_device
                 )
                 val_acc = vllm_accuracy(
-                    llm, eval_records, args.max_new_tokens
+                    llm, eval_records, args.max_new_tokens,
+                    eos_token=tokenizer.eos_token,
                 )
 
                 print(
