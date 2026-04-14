@@ -58,7 +58,7 @@ def parse_args():
 
     # Logging
     p.add_argument("--use_wandb",      action="store_true")
-    p.add_argument("--wandb_project",  type=str, default="sft_math2")
+    p.add_argument("--wandb_project",  type=str, default="sft_math3")
 
     return p.parse_args()
 

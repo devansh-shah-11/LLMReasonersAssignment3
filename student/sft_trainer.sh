@@ -4,7 +4,7 @@
 #SBATCH --partition=c24m170-a100-2 
 #SBATCH --output=./logs/%j_%x.out
 #SBATCH --error=./logs/%j_%x.err
-#SBATCH --time=06:00:00
+#SBATCH --time=01:15:00
 #SBATCH --gres=gpu:a100:2
 #SBATCH --requeue
 
@@ -13,7 +13,7 @@ DATASET_DIR="/scratch/dns5508/dataset/intellect_math"
 MODEL_DIR="/scratch/dns5508/model_V2"
 
 # Dataset sizes ("" = full dataset)
-DATA_SIZES=("")
+DATA_SIZES=(128)
 # DATA_SIZES=(512 1024 "")
 # Hyperparameters
 LEARNING_RATES=(1e-4 5e-5)
