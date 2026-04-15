@@ -1,14 +1,16 @@
 import argparse
+import json
 import os
 import re
 import random
+from collections import Counter
 from typing import Literal
 from unittest.mock import patch
 
 import torch
 import torch.nn as nn
 import wandb
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, get_cosine_schedule_with_warmup
 
 from student.sft_helper import (
     compute_group_normalized_rewards,
@@ -99,46 +101,83 @@ def build_prompt(example: dict, prompt_template: str) -> str:
 
 
 def build_ground_truth(example: dict) -> str:
-    """'target|n1,n2,...' string consumed by the reward function."""
-    nums = ",".join(str(n) for n in example["numbers"])
-    return f"{example['target']}|{nums}"
+    """JSON string consumed by the reward function."""
+    return json.dumps({
+        "target": int(example["target"]),
+        "numbers": sorted(int(n) for n in example["numbers"]),
+    })
+
+
+def _try_evaluate(expr: str):
+    safe_chars = set("0123456789+-*/() .\t\n")
+    if not expr or not all(c in safe_chars for c in expr):
+        return None
+    try:
+        return float(eval(expr, {"__builtins__": {}}, {}))
+    except Exception:
+        return None
+
+
+def _extract_candidate_expressions(answer_text: str) -> list[str]:
+    candidates = []
+    for raw_line in answer_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        line = re.sub(r"^\s*Step\s*\d+\s*[:.]\s*", "", line).strip()
+        if not line:
+            continue
+        if "=" in line:
+            lhs = line.rsplit("=", 1)[0].strip()
+            if lhs:
+                candidates.append(lhs)
+        else:
+            candidates.append(line)
+    flattened = " ".join(answer_text.split())
+    if flattened:
+        candidates.append(flattened)
+    deduped, seen = [], set()
+    for c in candidates:
+        if c not in seen:
+            deduped.append(c)
+            seen.add(c)
+    return deduped
 
 
 def countdown_reward_fn(response: str, ground_truth: str) -> dict[str, float]:
     """
-    Parse <answer>…</answer>, evaluate arithmetic, compare to target.
-    ground_truth = "target|n1,n2,..."
+    Binary reward: 1.0 iff response is correctly formatted, evaluates to target,
+    and uses exactly the allowed numbers.
+    ground_truth = JSON {"target": int, "numbers": [sorted list]}
     """
-    format_reward = answer_reward = 0.0
-
     try:
-        target_str, _ = ground_truth.split("|", 1)
-        target = int(target_str.strip())
+        gt = json.loads(ground_truth)
+        target = int(gt["target"])
+        allowed = sorted(int(x) for x in gt["numbers"])
     except Exception:
         return {"reward": 0.0, "format_reward": 0.0, "answer_reward": 0.0}
 
-    m = re.search(r"<answer>(.*?)</answer>", response, re.DOTALL)
-    if m:
-        format_reward = 1.0
-        answer_text = m.group(1).strip()
-        try:
-            eq_matches = re.findall(r"=\s*([\-\d\.]+)\s*$", answer_text, re.MULTILINE)
-            if eq_matches:
-                result = float(eq_matches[-1])
-            else:
-                expr = re.sub(r"Step\s*\d+\s*:", "", answer_text)
-                lines = [l.strip() for l in expr.splitlines() if l.strip()]
-                last = lines[-1] if lines else expr
-                if "=" in last:
-                    last = last.split("=")[0].strip()
-                result = float(eval(last, {"__builtins__": {}}))
-            if abs(result - target) < 1e-6:
-                answer_reward = 1.0
-        except Exception:
-            answer_reward = 0.0
+    if "<answer>" not in response or "</answer>" not in response:
+        return {"reward": 0.0, "format_reward": 0.0, "answer_reward": 0.0}
 
-    reward = 0.1 * format_reward + 0.9 * answer_reward
-    return {"reward": reward, "format_reward": format_reward, "answer_reward": answer_reward}
+    answer_text = response.split("<answer>", 1)[-1].split("</answer>", 1)[0].strip()
+    if not answer_text:
+        return {"reward": 0.0, "format_reward": 0.0, "answer_reward": 0.0}
+
+    candidates = _extract_candidate_expressions(answer_text)
+
+    for expr in candidates:
+        result = _try_evaluate(expr)
+        if result is None:
+            continue
+        if abs(result - target) >= 1e-6:
+            continue
+        used = Counter(int(n) for n in re.findall(r"\b\d+\b", expr))
+        avail = Counter(allowed)
+        if all(used[n] <= avail[n] for n in used):
+            return {"reward": 1.0, "format_reward": 1.0, "answer_reward": 1.0}
+
+    return {"reward": 0.0, "format_reward": 1.0, "answer_reward": 0.0}
 
 
 def init_vllm(model_id: str, device: str, seed: int,
@@ -240,6 +279,7 @@ def grpo_train(
     # Algorithm
     n_grpo_steps: int = 200,
     learning_rate: float = 1e-5,
+    warmup_ratio: float = 0.05,
     advantage_eps: float = 1e-6,
     rollout_batch_size: int = 16,
     group_size: int = 8,
@@ -321,6 +361,7 @@ def grpo_train(
         model_id,
         torch_dtype=torch.bfloat16,
     ).to(policy_device)
+    policy.gradient_checkpointing_enable()
 
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     if tokenizer.pad_token_id is None:
@@ -336,6 +377,12 @@ def grpo_train(
         policy.parameters(), lr=learning_rate,
         weight_decay=0.0, betas=(0.9, 0.95),
     )
+    warmup_steps = int(warmup_ratio * n_grpo_steps)
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=n_grpo_steps,
+    )
 
     data_idx = train_step = eval_step = 0
     print(f"\n[train] Starting GRPO — {n_grpo_steps} steps\n")
@@ -346,11 +393,7 @@ def grpo_train(
         policy.eval()
         load_policy_into_vllm_instance(policy, llm)
 
-        batch_examples = [
-            train_examples[(data_idx + i) % len(train_examples)]
-            for i in range(n_prompts_per_rollout)
-        ]
-        data_idx = (data_idx + n_prompts_per_rollout) % len(train_examples)
+        batch_examples = random.sample(train_examples, n_prompts_per_rollout)
 
         prompts = [build_prompt(ex, prompt_template) for ex in batch_examples]
         ground_truths = [build_ground_truth(ex) for ex in batch_examples]
@@ -388,9 +431,9 @@ def grpo_train(
         adv_col = advantages.unsqueeze(1).to(policy_device)
         rwd_col = raw_rewards.unsqueeze(1).to(policy_device)
 
-        # ---- Phase 4: Old log-probs (grpo_clip only) -------------------- #
+        # ---- Phase 4: Old log-probs
         old_log_probs_all = None
-        if loss_type == "grpo_clip":
+        if loss_type == "grpo_clip" or epochs_per_rollout_batch > 1:
             policy.eval()
             with torch.inference_mode():
                 old_lp = get_response_log_probs(
@@ -432,7 +475,7 @@ def grpo_train(
                 scaled_loss, meta = grpo_microbatch_train_step(
                     policy_log_probs=policy_lp,
                     response_mask=mb_mask,
-                    gradient_accumulation_steps=n_micro,
+                    gradient_accumulation_steps=gradient_accumulation_steps,
                     loss_type=loss_type,
                     raw_rewards=mb_rwd,
                     advantages=mb_adv,
@@ -452,6 +495,8 @@ def grpo_train(
 
             grad_norm = nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
             optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad()
 
             train_step += 1
             log = {
@@ -460,6 +505,7 @@ def grpo_train(
                 "train/token_entropy": agg_entropy / n_micro,
                 "train/mean_reward": reward_meta["mean_raw_reward"],
                 "train/max_reward": reward_meta["max_raw_reward"],
+                "train/learning_rate": scheduler.get_last_lr()[0],
                 "train_step": train_step,
             }
             if loss_type == "grpo_clip":
@@ -536,6 +582,7 @@ if __name__ == "__main__":
     # Algorithm
     parser.add_argument("--n_grpo_steps", type=int, default=200)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
+    parser.add_argument("--warmup_ratio", type=float, default=0.05)
     parser.add_argument("--rollout_batch_size", type=int, default=16)
     parser.add_argument("--group_size", type=int, default=8)
     parser.add_argument("--train_batch_size", type=int, default=16)
