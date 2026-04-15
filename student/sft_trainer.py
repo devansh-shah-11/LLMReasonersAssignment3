@@ -188,7 +188,7 @@ def init_vllm(model_name: str, dtype: str = "bfloat16") -> LLM:
             model=model_name,
             device="cuda:1",
             dtype=torch.bfloat16,
-            gpu_memory_utilization=0.85,
+            gpu_memory_utilization=0.45,
             enable_prefix_caching=True,
             trust_remote_code=True,
         )
