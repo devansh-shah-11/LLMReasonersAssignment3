@@ -36,12 +36,14 @@ def parse_args():
                    help="Physical per-step batch size (DataLoader batch_size).")
     p.add_argument("--grad_accum_steps", type=int,   default=16,
                    help="Gradient accumulation steps.")
-    p.add_argument("--learning_rate",    type=float, default=1e-4)
+    p.add_argument("--learning_rate",    type=float, default=2e-5)
     p.add_argument("--max_train_samples",type=int,   default=None,
                    help="Cap on unique training examples. Omit for full dataset.")
     p.add_argument("--max_seq_len",  type=int,   default=1024)
-    p.add_argument("--warmup_ratio", type=float, default=0.05)
-    p.add_argument("--weight_decay", type=float, default=0.01)
+    p.add_argument("--warmup_ratio", type=float, default=0.1)
+    p.add_argument("--weight_decay", type=float, default=0.0)
+    p.add_argument("--eval_every",   type=int,   default=50,
+                   help="Evaluate every N optimizer steps.")
     p.add_argument("--seed", type=int,   default=42)
 
     # Model
@@ -194,9 +196,9 @@ def init_vllm(model_name: str, dtype: str = "bfloat16") -> LLM:
     return llm
 
 
-def sync_weights_to_vllm(llm: LLM, policy_model, sync_dir: str):
-    """Save policy weights to disk and hot-load them into the live vLLM engine."""
-    policy_model.save_pretrained(sync_dir)
+def sync_weights_to_vllm(llm: LLM, policy_model):
+    """Copy policy weights directly into the live vLLM engine (in-memory, no disk I/O)."""
+    state_dict = policy_model.state_dict()
     llm_model = (
         llm.llm_engine
            .model_executor
@@ -204,15 +206,7 @@ def sync_weights_to_vllm(llm: LLM, policy_model, sync_dir: str):
            .model_runner
            .model
     )
-    # Load to CPU to avoid touching CUDA and polluting the vLLM GPU
-    tmp_model  = AutoModelForCausalLM.from_pretrained(
-        sync_dir, torch_dtype=torch.bfloat16, trust_remote_code=True,
-        device_map="cpu"
-    )
-    state_dict = tmp_model.state_dict()
     llm_model.load_weights(state_dict.items())
-    del tmp_model, state_dict
-    torch.cuda.empty_cache()
 
 
 def vllm_accuracy(
@@ -302,10 +296,8 @@ def train(args):
     policy_device = torch.device("cuda:0")
     eval_device = "cuda:1"
     
-    output_dir    = Path(args.output_dir) / args.run_name
+    output_dir = Path(args.output_dir) / args.run_name
     output_dir.mkdir(parents=True, exist_ok=True)
-    sync_dir = str(output_dir / "_ckpt_sync")
-    os.makedirs(sync_dir, exist_ok=True)
 
     # ---- Load data ----
     print(f"Loading train: {args.train_data_path}")
@@ -362,11 +354,11 @@ def train(args):
     total_steps     = steps_per_epoch * args.num_epochs
     warmup_steps    = max(1, int(total_steps * args.warmup_ratio))
     
-    evals_per_epoch = 2
-    eval_steps = max(1, steps_per_epoch // evals_per_epoch)
+    eval_steps = args.eval_every
 
     optimizer = AdamW(model.parameters(), lr=args.learning_rate,
-                      weight_decay=args.weight_decay)
+                      weight_decay=args.weight_decay,
+                      betas=(0.9, 0.95))
     scheduler = get_cosine_schedule_with_warmup(
         optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps
     )
@@ -375,7 +367,7 @@ def train(args):
         f"\nRun: {args.run_name}\n"
         f"  train_samples={len(train_records)}  grad_accum={grad_accum}\n"
         f"  steps_per_epoch={steps_per_epoch}  total_steps={total_steps}\n"
-        f"  eval_every={eval_steps} steps (~{evals_per_epoch} evals/epoch)\n"
+        f"  eval_every={eval_steps} optimizer steps\n"
     )
 
     # ---- wandb ----
@@ -386,9 +378,10 @@ def train(args):
             config=vars(args),
         )
 
-    global_step   = 0
-    best_val_loss = float("inf")
-    accum_loss    = 0.0
+    global_step    = 0
+    best_val_loss  = float("inf")
+    running_loss   = 0.0
+    running_count  = 0
 
     # ---- Training loop ----
     for epoch in range(1, args.num_epochs + 1):
@@ -403,16 +396,14 @@ def train(args):
             out       = get_response_log_probs(model, input_ids, labels)
             log_probs = out["log_probs"]
 
-            n_response = max(response_mask.sum().item(), 1.0)
-            batch_size = response_mask.shape[0]
-
             scaled_loss, _ = sft_microbatch_train_step(
                 policy_log_probs=log_probs,
                 response_mask=response_mask,
                 gradient_accumulation_steps=grad_accum,
-                normalize_constant=n_response / batch_size,
             )
-            accum_loss += scaled_loss.item() * grad_accum
+            # Unscale to get the true per-step loss for logging
+            running_loss  += scaled_loss.item() * grad_accum
+            running_count += 1
 
             if (micro_step + 1) % grad_accum != 0:
                 continue
@@ -424,8 +415,9 @@ def train(args):
             optimizer.zero_grad()
             global_step += 1
 
-            train_loss = accum_loss / grad_accum
-            accum_loss = 0.0
+            train_loss    = running_loss / running_count
+            running_loss  = 0.0
+            running_count = 0
 
             if args.use_wandb:
                 wandb.log({"train/loss": train_loss,
@@ -434,7 +426,7 @@ def train(args):
 
             # ---- Eval ----
             if global_step % eval_steps == 0 or global_step == total_steps:
-                sync_weights_to_vllm(llm, model, sync_dir)
+                sync_weights_to_vllm(llm, model)
                 val_loss, val_entropy = evaluate_val_metrics(
                     model, eval_loader, policy_device
                 )
@@ -473,8 +465,9 @@ def train(args):
             scheduler.step()
             optimizer.zero_grad()
             global_step += 1
-            train_loss = accum_loss / grad_accum  # average over microsteps, not sum
-            accum_loss = 0.0
+            train_loss    = running_loss / max(running_count, 1)
+            running_loss  = 0.0
+            running_count = 0
             if args.use_wandb:
                 wandb.log({"train/loss": train_loss,
                            "train/lr":   scheduler.get_last_lr()[0]},
@@ -490,9 +483,6 @@ def train(args):
     # ---- Train loss drop summary ----
     if args.use_wandb:
         wandb.finish()
-
-    import shutil
-    shutil.rmtree(sync_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
