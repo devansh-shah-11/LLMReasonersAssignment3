@@ -287,7 +287,6 @@ def grpo_train(
     sampling_min_tokens: int = 4,
     sampling_max_tokens: int = 1024,
     epochs_per_rollout_batch: int = 1,
-    train_batch_size: int = 16,
     gradient_accumulation_steps: int = 16,
     gpu_memory_utilization: float = 0.80,
     loss_type: Literal[
@@ -308,18 +307,20 @@ def grpo_train(
     random.seed(seed)
 
     # ---- sanity checks -------------------------------------------------- #
-    assert train_batch_size % gradient_accumulation_steps == 0, \
-        "train_batch_size must be divisible by gradient_accumulation_steps"
-    micro_bs = train_batch_size // gradient_accumulation_steps
-
     assert rollout_batch_size % group_size == 0, \
         "rollout_batch_size must be divisible by group_size"
     n_prompts_per_rollout = rollout_batch_size // group_size
-    assert train_batch_size >= group_size
 
-    if epochs_per_rollout_batch > 1 or train_batch_size > rollout_batch_size:
+    # train_batch_size is derived: all rollout samples across all epochs
+    train_batch_size = rollout_batch_size * epochs_per_rollout_batch
+    assert train_batch_size % gradient_accumulation_steps == 0, \
+        "rollout_batch_size * epochs_per_rollout_batch must be divisible by gradient_accumulation_steps"
+    micro_bs = train_batch_size // gradient_accumulation_steps
+    n_micro  = rollout_batch_size // micro_bs
+
+    if epochs_per_rollout_batch > 1:
         assert loss_type == "grpo_clip", \
-            "Off-policy training requires loss_type='grpo_clip'"
+            "Multi-epoch training requires loss_type='grpo_clip'"
 
     run_suffix_parts = [f"lr{learning_rate}", f"loss{loss_type}"]
     if use_length_normalize:
@@ -339,7 +340,7 @@ def grpo_train(
             model_id=model_id, n_grpo_steps=n_grpo_steps,
             learning_rate=learning_rate, rollout_batch_size=rollout_batch_size,
             group_size=group_size, train_batch_size=train_batch_size,
-            gradient_accumulation_steps=gradient_accumulation_steps,
+            micro_bs=micro_bs, gradient_accumulation_steps=gradient_accumulation_steps,
             loss_type=loss_type, use_std_normalization=use_std_normalization,
             epochs_per_rollout_batch=epochs_per_rollout_batch,
             use_length_normalize=use_length_normalize,
@@ -445,14 +446,11 @@ def grpo_train(
             old_log_probs_all = old_lp["log_probs"].detach()
 
         # ---- Phase 5: Inner gradient steps ------------------------------ #
-        policy.train()
+        agg_loss = agg_entropy = agg_clip = 0.0
 
         for _epoch in range(epochs_per_rollout_batch):
-            perm    = torch.randperm(rollout_batch_size)
-            n_micro = rollout_batch_size // micro_bs
-
+            perm = torch.randperm(rollout_batch_size)
             optimizer.zero_grad()
-            agg_loss = agg_entropy = agg_clip = 0.0
 
             for mi in range(n_micro):
                 idx = perm[mi * micro_bs : (mi + 1) * micro_bs]
@@ -465,6 +463,7 @@ def grpo_train(
                 mb_old_lp = (old_log_probs_all[idx]
                              if old_log_probs_all is not None else None)
 
+                policy.train()
                 lp_out = get_response_log_probs(
                     model=policy, input_ids=mb_ids, labels=mb_labels,
                     return_token_entropy=True,
@@ -495,22 +494,25 @@ def grpo_train(
 
             grad_norm = nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
             optimizer.step()
-            scheduler.step()
             optimizer.zero_grad()
 
-            train_step += 1
-            log = {
-                "train/loss": agg_loss,
-                "train/grad_norm": grad_norm.item(),
-                "train/token_entropy": agg_entropy / n_micro,
-                "train/mean_reward": reward_meta["mean_raw_reward"],
-                "train/max_reward": reward_meta["max_raw_reward"],
-                "train/learning_rate": scheduler.get_last_lr()[0],
-                "train_step": train_step,
-            }
-            if loss_type == "grpo_clip":
-                log["train/clip_fraction"] = agg_clip / n_micro
-            wandb.log(log)
+        # scheduler steps once per GRPO step, not once per epoch
+        scheduler.step()
+        train_step += 1
+
+        n_micro_total = n_micro * epochs_per_rollout_batch
+        log = {
+            "train/loss": agg_loss,
+            "train/grad_norm": grad_norm.item(),
+            "train/token_entropy": agg_entropy / n_micro_total,
+            "train/mean_reward": reward_meta["mean_raw_reward"],
+            "train/max_reward": reward_meta["max_raw_reward"],
+            "train/learning_rate": scheduler.get_last_lr()[0],
+            "train_step": train_step,
+        }
+        if loss_type == "grpo_clip":
+            log["train/clip_fraction"] = agg_clip / n_micro_total
+        wandb.log(log)
 
         # ---- Phase 6: Evaluation ---------------------------------------- #
         if grpo_step % eval_every == 0:
@@ -585,7 +587,6 @@ if __name__ == "__main__":
     parser.add_argument("--warmup_ratio", type=float, default=0.05)
     parser.add_argument("--rollout_batch_size", type=int, default=16)
     parser.add_argument("--group_size", type=int, default=8)
-    parser.add_argument("--train_batch_size", type=int, default=16)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=16)
     parser.add_argument("--epochs_per_rollout_batch", type=int, default=1)
     parser.add_argument("--sampling_temperature", type=float, default=0.7)
