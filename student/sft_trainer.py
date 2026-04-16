@@ -42,8 +42,8 @@ def parse_args():
     p.add_argument("--max_seq_len",  type=int,   default=1024)
     p.add_argument("--warmup_ratio", type=float, default=0.1)
     p.add_argument("--weight_decay", type=float, default=0.0)
-    p.add_argument("--eval_every",   type=int,   default=50,
-                   help="Evaluate every N optimizer steps.")
+    p.add_argument("--min_eval_steps", type=int,   default=1,
+                   help="Minimum steps between evaluations (prevents too-frequent evals on small datasets).")
     p.add_argument("--seed", type=int,   default=42)
 
     # Model
@@ -354,7 +354,8 @@ def train(args):
     total_steps     = steps_per_epoch * args.num_epochs
     warmup_steps    = max(1, int(total_steps * args.warmup_ratio))
     
-    eval_steps = args.eval_every
+    # Ensure at least 20 evaluations total, but respect minimum spacing between evals
+    eval_steps = max(args.min_eval_steps, total_steps // 20)
 
     optimizer = AdamW(model.parameters(), lr=args.learning_rate,
                       weight_decay=args.weight_decay,
