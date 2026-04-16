@@ -8,12 +8,12 @@
 #SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=128G
-#SBATCH --time=4:00:00
+#SBATCH --time=1:30:00
 #SBATCH --requeue
-#SBATCH --array=0-3%2
+#SBATCH --array=0-1%2
 
 # --- Learning rate sweep ---
-LR_CONFIGS=(1e-5 2e-5 5e-4 1e-4)
+LR_CONFIGS=(4e-5 6e-5)
 LEARNING_RATE=${LR_CONFIGS[$SLURM_ARRAY_TASK_ID]}
 
 echo "############### Run Log: $(date +%Y-%m-%d_%H:%M:%S) ###############"
