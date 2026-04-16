@@ -1,75 +1,77 @@
 #!/bin/bash
-#SBATCH --job-name=grpo_length_norm
-#SBATCH --account=csci_ga_3033_131-2026sp
-#SBATCH --partition=c24m170-a100-2
-#SBATCH --output=./logs/%j_%x.out
-#SBATCH --error=./logs/%j_%x.err
-#SBATCH --time=01:30:00
-#SBATCH --gres=gpu:a100:2
+#SBATCH --job-name=q1-dns5508-lenorm
+#SBATCH --output=./grpo_logs_dns5508_q1/%j_%x_%a.out
+#SBATCH --error=./grpo_logs_dns5508_q1/%j_%x_%a.err
+#SBATCH --mail-type=END
+#SBATCH --mail-user=at6646@nyu.edu
+#SBATCH --partition=a100_dev
+#SBATCH --gres=gpu:2
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=128G
+#SBATCH --time=1:30:00
 #SBATCH --requeue
-#SBATCH --mail-user=dns5508@nyu.edu
-#SBATCH --mail-type=all
+#SBATCH --array=0-1%2
 
 # ============================================================
 # Experiment: Effect of Length Normalization
 # Compares:
-#   (1) masked_mean   -- default; global mean over all response tokens
-#                        (equal gradient weight per token regardless of seq length)
-#   (2) masked_normalize (--use_length_normalize) -- sum per sequence / max_gen_len
-#                        (equal gradient weight per sequence regardless of seq length)
+#   (0) no --use_length_normalize  -- default masked_mean
+#   (1) --use_length_normalize     -- masked_normalize (per-sequence weighting)
 #
-# Best LR: 5e-5. Best loss_type from baselines experiment assumed to be
-# reinforce_with_baseline (update if different). All other params use defaults.
+# Best LR from lr sweep: 2e-5
+# Best loss_type from baselines: reinforce_with_baseline
 # ============================================================
 
-BEST_LR=5e-5
-BEST_LOSS_TYPE=reinforce_with_baseline   # update if baselines experiment says otherwise
+USE_LEN_NORM_FLAGS=(""  "--use_length_normalize")
+LEN_NORM_NAMES=(masked_mean  masked_normalize)
 
-DATASET_DIR="/scratch/dns5508/dataset/countdown"
-PROMPT_FILE="student/prompts/countdown.prompt"
-BASE_OUTPUT_DIR="/scratch/dns5508/model_grpo"
+USE_LEN_NORM=${USE_LEN_NORM_FLAGS[$SLURM_ARRAY_TASK_ID]}
+LEN_NORM_NAME=${LEN_NORM_NAMES[$SLURM_ARRAY_TASK_ID]}
 
-mkdir -p ./logs
+echo "############### Run Log: $(date +%Y-%m-%d_%H:%M:%S) ###############"
+echo "SLURM_ARRAY_TASK_ID: $SLURM_ARRAY_TASK_ID"
 
-singularity exec --bind /scratch --nv \
---overlay /scratch/dns5508/env/another__overlay-25GB-500K.ext3:ro \
-/scratch/dns5508/ubuntu-20.04.3.sif \
-/bin/bash -c "
-source /ext3/miniconda3/etc/profile.d/conda.sh
-export PATH=/home/dns5508/.local/bin:\$PATH
-conda activate llmr
-cd /scratch/dns5508/LLMReasonersAssignment3
+# Configuration
+BEST_LR=2e-5
+BEST_LOSS_TYPE=reinforce_with_baseline
+DATASET_DIR="/gpfs/scratch/an4462/at6646/llmr-a3/data/data-distrib/countdown"
+OUTPUT_DIR="../grpo_q1_dn5508/model_grpo/length_norm"
+PROMPT_FILE="/gpfs/scratch/an4462/at6646/dns5508/LLMReasonersAssignment3/student/prompts/countdown.prompt"
 
-echo 'Warming up CUDA kernels...'
-python3 student/grpo_trainer.py \
-  --data_path $DATASET_DIR \
-  --prompt_file $PROMPT_FILE \
-  --learning_rate $BEST_LR \
-  --loss_type reinforce_with_baseline \
-  --n_grpo_steps 20 \
-  --output_dir ${BASE_OUTPUT_DIR}/warmup_discard \
-  --wandb_project grpo-warmup-discard
+mkdir -p ./grpo_logs_dns5508_q1
+mkdir -p $OUTPUT_DIR
 
-echo '=============================='
-echo 'Run 1/2: masked_mean (default)'
-echo '=============================='
-python3 student/grpo_trainer.py \
-  --data_path $DATASET_DIR \
-  --prompt_file $PROMPT_FILE \
-  --learning_rate $BEST_LR \
-  --loss_type $BEST_LOSS_TYPE \
-  --output_dir ${BASE_OUTPUT_DIR}/length_norm_masked_mean \
-  --wandb_run_name length_norm_masked_mean
+# Load environment variables
+if [ -f /gpfs/scratch/an4462/at6646/dns5508/LLMReasonersAssignment3/.env ]; then
+  export $(cat /gpfs/scratch/an4462/at6646/dns5508/LLMReasonersAssignment3/.env | grep WANDB_API_KEY | xargs)
+fi
 
-echo '=============================='
-echo 'Run 2/2: masked_normalize (--use_length_normalize)'
-echo '=============================='
-python3 student/grpo_trainer.py \
-  --data_path $DATASET_DIR \
-  --prompt_file $PROMPT_FILE \
+echo "=============================="
+echo "GRPO Length Norm Experiment"
+echo "=============================="
+echo "Length norm: $LEN_NORM_NAME"
+echo "Learning rate: $BEST_LR"
+echo "Loss type: $BEST_LOSS_TYPE"
+echo "Dataset: $DATASET_DIR"
+echo "Output: $OUTPUT_DIR"
+echo "=============================="
+
+wandb login --relogin $WANDB_API_KEY
+
+uv run python /gpfs/scratch/an4462/at6646/dns5508/LLMReasonersAssignment3/student/grpo_trainer.py \
+  --data_path "$DATASET_DIR" \
+  --prompt_file "$PROMPT_FILE" \
+  --output_dir "$OUTPUT_DIR" \
+  --policy_device cuda:0 \
+  --vllm_device cuda:1 \
   --learning_rate $BEST_LR \
   --loss_type $BEST_LOSS_TYPE \
-  --use_length_normalize \
-  --output_dir ${BASE_OUTPUT_DIR}/length_norm_masked_normalize \
-  --wandb_run_name length_norm_masked_normalize
-"
+  $USE_LEN_NORM \
+  --rollout_batch_size 16 \
+  --group_size 8 \
+  --gradient_accumulation_steps 8 \
+  --epochs_per_rollout_batch 1 \
+  --gpu_memory_utilization 0.45 \
+  --wandb_run_name "length_norm_${LEN_NORM_NAME}"
+
+echo "Done: $(date +%Y-%m-%d_%H:%M:%S)"
