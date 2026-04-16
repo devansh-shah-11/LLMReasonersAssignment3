@@ -1,19 +1,19 @@
 #!/bin/bash
-#SBATCH --job-name=grpo_trainer
-#SBATCH --account=csci_ga_3033_131-2026sp
-#SBATCH --partition=c24m170-a100-2 
-#SBATCH --output=./logs/%j_%x.out
-#SBATCH --error=./logs/%j_%x.err
-#SBATCH --time=01:15:00
-#SBATCH --gres=gpu:a100:2
+#SBATCH --job-name=q1-dns5508
+#SBATCH --output=./grpo_logs_dns5508_q1/%j_%x.out
+#SBATCH --error=./grpo_logs_dns5508_q1/%j_%x.err
+#SBATCH --mail-type=END
+#SBATCH --mail-user=at6646@nyu.edu
+#SBATCH --partition=a100_dev
+#SBATCH --gres=gpu:2
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=128G
+#SBATCH --time=4:00:00
 #SBATCH --requeue
-#SBATCH --mail-user=dns5508@nyu.edu
-#SBATCH --mail-type=all
-
 # Configuration
-DATASET_DIR="/scratch/dns5508/dataset/countdown"
-OUTPUT_DIR="/scratch/dns5508/model_grpo"
-PROMPT_FILE="student/prompts/countdown.prompt"
+DATASET_DIR="/gpfs/scratch/an4462/at6646/llmr-a3/data/data-distrib/countdown"
+OUTPUT_DIR="../grpo_q1_dn5508/model_grpo"
+PROMPT_FILE="/gpfs/scratch/an4462/at6646/dns5508/LLMReasonersAssignment3/student/prompts/countdown.prompt"
 
 RUN_NAME="grpo_$(date +%Y%m%d_%H%M%S)"
 
@@ -22,8 +22,8 @@ mkdir -p ./logs
 mkdir -p $OUTPUT_DIR
 
 # Load environment variables
-if [ -f /scratch/dns5508/LLMReasonersAssignment3/.env ]; then
-  export $(cat /scratch/dns5508/LLMReasonersAssignment3/.env | grep WANDB_API_KEY | xargs)
+if [ -f /gpfs/scratch/an4462/at6646/dns5508/LLMReasonersAssignment3/.env ]; then
+  export $(cat /gpfs/scratch/an4462/at6646/dns5508/LLMReasonersAssignment3/.env | grep WANDB_API_KEY | xargs)
 fi
 
 echo "=============================="
@@ -35,16 +35,11 @@ echo "Output: $OUTPUT_DIR"
 echo "=============================="
 
 # Run GRPO training (using default hyperparameters)
-singularity exec --bind /scratch --nv \
---overlay /scratch/dns5508/env/another__overlay-25GB-500K.ext3:ro \
-/scratch/dns5508/ubuntu-20.04.3.sif \
-/bin/bash -c "
-source /ext3/miniconda3/etc/profile.d/conda.sh
-export PATH=/home/dns5508/.local/bin:\$PATH
-conda activate llmr
+
+
 wandb login --relogin $WANDB_API_KEY
-cd /scratch/dns5508/LLMReasonersAssignment3
-python3 student/grpo_trainer.py \
+
+uv run python /gpfs/scratch/an4462/at6646/dns5508/LLMReasonersAssignment3/student/grpo_trainer.py \
   --data_path "$DATASET_DIR" \
   --prompt_file "$PROMPT_FILE" \
   --output_dir "$OUTPUT_DIR" \
@@ -56,4 +51,3 @@ python3 student/grpo_trainer.py \
   --epochs_per_rollout_batch 1 \
   --gpu_memory_utilization 0.85 \
   --wandb_run_name "$RUN_NAME"
-"
