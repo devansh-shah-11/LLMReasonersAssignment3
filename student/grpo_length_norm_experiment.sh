@@ -32,7 +32,7 @@ echo "############### Run Log: $(date +%Y-%m-%d_%H:%M:%S) ###############"
 echo "SLURM_ARRAY_TASK_ID: $SLURM_ARRAY_TASK_ID"
 
 # Configuration
-BEST_LR=2e-5
+BEST_LR=3e-5
 BEST_LOSS_TYPE=reinforce_with_baseline
 DATASET_DIR="/gpfs/scratch/an4462/at6646/llmr-a3/data/data-distrib/countdown"
 OUTPUT_DIR="../grpo_q1_dn5508/model_grpo/length_norm"
