@@ -147,7 +147,7 @@ def _extract_candidate_expressions(answer_text: str) -> list[str]:
 def countdown_reward_fn(response: str, ground_truth: str) -> dict[str, float]:
     """
     Binary reward: 1.0 iff response is correctly formatted, evaluates to target,
-    and uses exactly the allowed numbers.
+    and uses exactly all the allowed numbers (each exactly once).
     ground_truth = JSON {"target": int, "numbers": [sorted list]}
     """
     try:
@@ -172,9 +172,8 @@ def countdown_reward_fn(response: str, ground_truth: str) -> dict[str, float]:
             continue
         if abs(result - target) >= 1e-6:
             continue
-        used = Counter(int(n) for n in re.findall(r"\b\d+\b", expr))
-        avail = Counter(allowed)
-        if all(used[n] <= avail[n] for n in used):
+        nums_used = sorted(int(n) for n in re.findall(r"\b\d+\b", expr))
+        if Counter(nums_used) == Counter(allowed):
             return {"reward": 1.0, "format_reward": 1.0, "answer_reward": 1.0}
 
     return {"reward": 0.0, "format_reward": 1.0, "answer_reward": 0.0}
