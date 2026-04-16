@@ -12,7 +12,7 @@
 #SBATCH --requeue
 
 # --- Learning rate sweep ---
-LR_CONFIGS=(5e-5 1e-4 5e-4)
+LR_CONFIGS=(1e-5 5e-5 1e-4 5e-4)
 
 # Configuration
 DATASET_DIR="/gpfs/scratch/an4462/at6646/llmr-a3/data/data-distrib/countdown"
