@@ -21,6 +21,11 @@ RUN_NAME="grpo_$(date +%Y%m%d_%H%M%S)"
 mkdir -p ./logs
 mkdir -p $OUTPUT_DIR
 
+# Load environment variables
+if [ -f /scratch/dns5508/LLMReasonersAssignment3/.env ]; then
+  export $(cat /scratch/dns5508/LLMReasonersAssignment3/.env | grep WANDB_API_KEY | xargs)
+fi
+
 echo "=============================="
 echo "GRPO Training"
 echo "=============================="
@@ -37,6 +42,7 @@ singularity exec --bind /scratch --nv \
 source /ext3/miniconda3/etc/profile.d/conda.sh
 export PATH=/home/dns5508/.local/bin:\$PATH
 conda activate llmr
+wandb login --relogin $WANDB_API_KEY
 cd /scratch/dns5508/LLMReasonersAssignment3
 python3 student/grpo_trainer.py \
   --data_path "$DATASET_DIR" \
