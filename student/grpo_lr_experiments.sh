@@ -10,10 +10,10 @@
 #SBATCH --mem=128G
 #SBATCH --time=1:30:00
 #SBATCH --requeue
-#SBATCH --array=0-1%2
+#SBATCH --array=0-0%1
 
 # --- Learning rate sweep ---
-LR_CONFIGS=(4e-5 6e-5)
+LR_CONFIGS=(3e-5)
 LEARNING_RATE=${LR_CONFIGS[$SLURM_ARRAY_TASK_ID]}
 
 echo "############### Run Log: $(date +%Y-%m-%d_%H:%M:%S) ###############"
