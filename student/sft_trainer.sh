@@ -21,20 +21,6 @@ BATCH_SIZES=(1 2)
 NUM_EPOCHS=5
 MIN_EVAL_STEPS=8
 
-# STATE TRACKING
-STATE_DIR="/scratch/dns5508/sft_sweep_state_v2"
-mkdir -p $STATE_DIR
-
-COMPLETED_FILE="$STATE_DIR/completed_runs.txt"
-RESULTS_FILE="$STATE_DIR/results.csv"
-
-touch $COMPLETED_FILE
-
-# Initialize results file if not exists
-if [ ! -f "$RESULTS_FILE" ]; then
-    echo "run_name,size,batch_size,lr,status" > $RESULTS_FILE
-fi
-
 # ========================
 # RUN FUNCTION
 # ========================
@@ -43,12 +29,6 @@ run_training () {
     local MAX_SAMPLES=$2
     local BATCH_SIZE=$3
     local LEARNING_RATE=$4
-
-    # Skip if already completed
-    if grep -Fxq "$RUN_NAME" $COMPLETED_FILE; then
-        echo "⏭ Skipping $RUN_NAME (already completed)"
-        return
-    fi
 
     echo "=============================="
     echo "Starting: $RUN_NAME"
@@ -74,7 +54,7 @@ run_training () {
       --train_batch_size ${BATCH_SIZE} \
       --learning_rate ${LEARNING_RATE} \
       --min_eval_steps ${MIN_EVAL_STEPS} \
-      $( [ -n \"$MAX_SAMPLES\" ] && echo \"--max_train_samples $MAX_SAMPLES\" ) \
+      $( [ -n "$MAX_SAMPLES" ] && echo "--max_train_samples $MAX_SAMPLES" ) \
       --device cuda:0 \
       --eval_device cuda:1 \
       --use_wandb
@@ -86,15 +66,8 @@ run_training () {
 
     if [ $STATUS -eq 0 ]; then
         echo "✅ SUCCESS: $RUN_NAME"
-
-        # Atomic append
-        echo "$RUN_NAME" >> "${COMPLETED_FILE}.tmp"
-        mv "${COMPLETED_FILE}.tmp" "$COMPLETED_FILE"
-
-        echo "${RUN_NAME},${MAX_SAMPLES:-full},${BATCH_SIZE},${LEARNING_RATE},success" >> $RESULTS_FILE
     else
         echo "❌ FAILED: $RUN_NAME"
-        echo "${RUN_NAME},${MAX_SAMPLES:-full},${BATCH_SIZE},${LEARNING_RATE},failed" >> $RESULTS_FILE
     fi
 
     echo ""
