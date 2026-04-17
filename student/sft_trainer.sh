@@ -13,13 +13,16 @@ DATASET_DIR="/scratch/dns5508/dataset/intellect_math"
 MODEL_DIR="/scratch/dns5508/model_V2"
 
 # Dataset sizes ("" = full dataset)
-DATA_SIZES=(128)
-# Hyperparameters
-LEARNING_RATES=(1e-4 5e-5)
+DATA_SIZES=(256)
+# Hyperparareters
+LEARNING_RATES=(1e-5 5e-5)
 BATCH_SIZES=(1 2)
 
-NUM_EPOCHS=5
-MIN_EVAL_STEPS=8
+NUM_EPOCHS=4
+# MIN_EVAL_STEPS per batch size: bs=1 -> 8, bs=2 -> 4 (equal evaluations per epoch)
+declare -A MIN_EVAL_STEPS_MAP
+MIN_EVAL_STEPS_MAP[1]=16
+MIN_EVAL_STEPS_MAP[2]=8
 
 # ========================
 # RUN FUNCTION
@@ -29,11 +32,12 @@ run_training () {
     local MAX_SAMPLES=$2
     local BATCH_SIZE=$3
     local LEARNING_RATE=$4
+    local MIN_EVAL_STEPS=${MIN_EVAL_STEPS_MAP[$BATCH_SIZE]}
 
     echo "=============================="
     echo "Starting: $RUN_NAME"
     echo "Samples: ${MAX_SAMPLES:-FULL}"
-    echo "Batch: $BATCH_SIZE | LR: $LEARNING_RATE"
+    echo "Batch: $BATCH_SIZE | LR: $LEARNING_RATE | Min eval steps: $MIN_EVAL_STEPS"
     echo "=============================="
 
     OUTPUT=$(singularity exec --bind /scratch --nv \
