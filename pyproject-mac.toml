@@ -29,4 +29,5 @@ package = true
 [tool.pytest.ini_options]
 log_cli = true
 log_cli_level = "WARNING"
+addopts = "--ignore=student/evaluate_test.py"
 

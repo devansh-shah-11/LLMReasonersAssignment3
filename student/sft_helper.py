@@ -177,7 +177,7 @@ def compute_group_normalized_rewards(
         group_mean = group_rewards.mean()
         
         if normalize_by_std:
-            group_std = group_rewards.std(unbiased=False) + advantage_eps
+            group_std = group_rewards.std(unbiased=True) + advantage_eps
             normalized = (group_rewards - group_mean) / group_std
         else:
             normalized = group_rewards - group_mean
@@ -319,7 +319,7 @@ def masked_mean(tensor: torch.Tensor, mask: torch.Tensor, dim: int | None = None
     else:
         # Reduce along specified dimension
         masked_sum = masked.sum(dim=dim, keepdim=True)
-        mask_count = mask.sum(dim=dim, keepdim=True).clamp(min=1)
+        mask_count = mask.sum(dim=dim, keepdim=True).float()
         result = masked_sum / mask_count
         result = result.squeeze(dim)
     
