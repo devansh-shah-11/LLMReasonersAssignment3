@@ -12,7 +12,7 @@
 DATASET_DIR="/scratch/dns5508/dataset/intellect_math"
 MODEL_DIR="/scratch/dns5508/model_V2"
 
-VAL_DATA="${DATASET_DIR}/val/data.json"
+VAL_DATA="${DATASET_DIR}/dev/data.json"
 TEST_DATA="${DATASET_DIR}/test/data.json"
 
 GRAD_ACCUM=8
