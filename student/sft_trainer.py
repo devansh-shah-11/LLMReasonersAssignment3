@@ -236,15 +236,11 @@ def vllm_accuracy(
     )
 
     correct = 0
-    n_fallback = 0
     for o, g in zip(outputs, golds):
         text = o.outputs[0].text
-        if _extract_boxed(text) is None:
-            n_fallback += 1
-        correct += is_correct(extract_answer(text), g)
-
-    if n_fallback > 0:
-        print(f"  [vllm_accuracy] used last-number fallback on {n_fallback}/{len(records)} examples")
+        boxed = _extract_boxed(text)
+        if boxed is not None:
+            correct += is_correct(boxed.strip(), g)
 
     return correct / len(records)
 
