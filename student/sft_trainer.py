@@ -26,12 +26,17 @@ def parse_args():
 
     # Paths (match sbatch script exactly)
     p.add_argument("--train_data_path", type=str, required=True)
-    p.add_argument("--eval_data_path", type=str, required=True)
+    p.add_argument("--eval_data_path",  type=str, required=True)
+    p.add_argument("--test_data_path",  type=str, default=None,
+                   help="Optional held-out test set. Evaluated once with the best checkpoint.")
     p.add_argument("--output_dir", type=str, required=True)
     p.add_argument("--run_name", type=str, default="sft_run")
 
     # Training
-    p.add_argument("--num_epochs", type=int,   default=3)
+    p.add_argument("--num_train_steps", type=int, default=None,
+                   help="Total optimizer steps. If set, overrides --num_epochs.")
+    p.add_argument("--num_epochs", type=int,   default=3,
+                   help="Number of epochs (ignored when --num_train_steps is set).")
     p.add_argument("--train_batch_size", type=int,   default=2,
                    help="Physical per-step batch size (DataLoader batch_size).")
     p.add_argument("--grad_accum_steps", type=int,   default=16,
@@ -42,6 +47,8 @@ def parse_args():
     p.add_argument("--max_seq_len",  type=int,   default=1024)
     p.add_argument("--warmup_ratio", type=float, default=0.1)
     p.add_argument("--weight_decay", type=float, default=0.0)
+    p.add_argument("--eval_steps", type=int, default=None,
+                   help="Evaluate every N optimizer steps. Defaults to total_steps // 20.")
     p.add_argument("--min_eval_steps", type=int,   default=1,
                    help="Minimum steps between evaluations (prevents too-frequent evals on small datasets).")
     p.add_argument("--seed", type=int,   default=42)
@@ -304,6 +311,9 @@ def train(args):
     train_records = load_jsonl(args.train_data_path)
     print(f"Loading eval:  {args.eval_data_path}")
     eval_records  = load_jsonl(args.eval_data_path)
+    test_records  = load_jsonl(args.test_data_path) if args.test_data_path else None
+    if test_records is not None:
+        print(f"Loading test:  {args.test_data_path}  ({len(test_records)} examples)")
 
     random.shuffle(train_records)
     if args.max_train_samples:
@@ -351,11 +361,17 @@ def train(args):
 
     # ---- Optimizer & scheduler ----
     steps_per_epoch = max(1, len(train_loader) // grad_accum)
-    total_steps     = steps_per_epoch * args.num_epochs
-    warmup_steps    = max(1, int(total_steps * args.warmup_ratio))
-    
-    # Ensure at least 20 evaluations total, but respect minimum spacing between evals
-    eval_steps = max(args.min_eval_steps, total_steps // 20)
+    if args.num_train_steps is not None:
+        total_steps = args.num_train_steps
+    else:
+        total_steps = steps_per_epoch * args.num_epochs
+    warmup_steps = max(1, int(total_steps * args.warmup_ratio))
+
+    # Eval cadence: explicit --eval_steps > auto (total // 20) > min_eval_steps floor
+    if args.eval_steps is not None:
+        eval_steps = args.eval_steps
+    else:
+        eval_steps = max(args.min_eval_steps, total_steps // 20)
 
     optimizer = AdamW(model.parameters(), lr=args.learning_rate,
                       weight_decay=args.weight_decay,
@@ -369,6 +385,7 @@ def train(args):
         f"  train_samples={len(train_records)}  grad_accum={grad_accum}\n"
         f"  steps_per_epoch={steps_per_epoch}  total_steps={total_steps}\n"
         f"  eval_every={eval_steps} optimizer steps\n"
+        f"  test_eval={'yes' if test_records else 'no'}\n"
     )
 
     # ---- wandb ----
@@ -383,105 +400,137 @@ def train(args):
     best_val_loss  = float("inf")
     running_loss   = 0.0
     running_count  = 0
+    micro_step_buf = 0  # counts micro-steps within current grad-accum window
 
-    # ---- Training loop ----
-    for epoch in range(1, args.num_epochs + 1):
-        model.train()
+    def _infinite_loader(loader):
+        """Cycle through the DataLoader indefinitely."""
+        while True:
+            yield from loader
+
+    model.train()
+    optimizer.zero_grad()
+
+    # ---- Step-based training loop ----
+    for batch in _infinite_loader(train_loader):
+        if global_step >= total_steps:
+            break
+
+        input_ids     = batch["input_ids"].to(policy_device)
+        labels        = batch["labels"].to(policy_device)
+        response_mask = batch["response_mask"].to(policy_device)
+
+        out       = get_response_log_probs(model, input_ids, labels)
+        log_probs = out["log_probs"]
+
+        scaled_loss, _ = sft_microbatch_train_step(
+            policy_log_probs=log_probs,
+            response_mask=response_mask,
+            gradient_accumulation_steps=grad_accum,
+        )
+        # Unscale to get the true per-step loss for logging
+        running_loss  += scaled_loss.item() * grad_accum
+        running_count += 1
+        micro_step_buf += 1
+
+        if micro_step_buf % grad_accum != 0:
+            continue
+
+        # ---- Optimizer step ----
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
+        scheduler.step()
         optimizer.zero_grad()
+        global_step    += 1
+        micro_step_buf  = 0
 
-        for micro_step, batch in enumerate(train_loader):
-            input_ids     = batch["input_ids"].to(policy_device)
-            labels        = batch["labels"].to(policy_device)
-            response_mask = batch["response_mask"].to(policy_device)
+        train_loss    = running_loss / running_count
+        running_loss  = 0.0
+        running_count = 0
 
-            out       = get_response_log_probs(model, input_ids, labels)
-            log_probs = out["log_probs"]
+        if args.use_wandb:
+            wandb.log({"train/loss": train_loss,
+                       "train/lr":   scheduler.get_last_lr()[0]},
+                      step=global_step)
 
-            scaled_loss, _ = sft_microbatch_train_step(
-                policy_log_probs=log_probs,
-                response_mask=response_mask,
-                gradient_accumulation_steps=grad_accum,
+        # ---- Eval ----
+        if global_step % eval_steps == 0 or global_step == total_steps:
+            sync_weights_to_vllm(llm, model)
+            val_loss, val_entropy = evaluate_val_metrics(
+                model, eval_loader, policy_device
             )
-            # Unscale to get the true per-step loss for logging
-            running_loss  += scaled_loss.item() * grad_accum
-            running_count += 1
+            val_acc = vllm_accuracy(
+                llm, eval_records, args.max_new_tokens,
+                eos_token=tokenizer.eos_token,
+            )
 
-            if (micro_step + 1) % grad_accum != 0:
-                continue
-
-            # ---- Optimizer step ----
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad()
-            global_step += 1
-
-            train_loss    = running_loss / running_count
-            running_loss  = 0.0
-            running_count = 0
+            print(
+                f"[step {global_step:4d}/{total_steps}]  "
+                f"train_loss={train_loss:.4f}  "
+                f"val_loss={val_loss:.4f}  "
+                f"val_entropy={val_entropy:.4f}  "
+                f"val_acc={val_acc:.3f}"
+            )
 
             if args.use_wandb:
-                wandb.log({"train/loss": train_loss,
-                           "train/lr":   scheduler.get_last_lr()[0]},
-                          step=global_step)
+                wandb.log({
+                    "eval/val_loss":    val_loss,
+                    "eval/val_entropy": val_entropy,
+                    "eval/val_acc":     val_acc,
+                }, step=global_step)
 
-            # ---- Eval ----
-            if global_step % eval_steps == 0 or global_step == total_steps:
-                sync_weights_to_vllm(llm, model)
-                val_loss, val_entropy = evaluate_val_metrics(
-                    model, eval_loader, policy_device
-                )
-                val_acc = vllm_accuracy(
-                    llm, eval_records, args.max_new_tokens,
-                    eos_token=tokenizer.eos_token,
-                )
+            # Save best model
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                model.save_pretrained(output_dir / "best")
+                tokenizer.save_pretrained(output_dir / "best")
+                print(f"  ✓ Best model saved (val_loss={best_val_loss:.4f})")
 
-                print(
-                    f"[epoch {epoch} | step {global_step:4d}]  "
-                    f"train_loss={train_loss:.4f}  "
-                    f"val_loss={val_loss:.4f}  "
-                    f"val_entropy={val_entropy:.4f}  "
-                    f"val_acc={val_acc:.3f}"
-                )
+            model.train()
 
-                if args.use_wandb:
-                    wandb.log({
-                        "eval/val_loss":    val_loss,
-                        "eval/val_entropy": val_entropy,
-                        "eval/val_acc":     val_acc,
-                    }, step=global_step)
-
-                # Save best model
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
-                    model.save_pretrained(output_dir / "best")
-                    tokenizer.save_pretrained(output_dir / "best")
-                    print(f"  ✓ Best model saved (val_loss={best_val_loss:.4f})")
-
-                model.train()
-
-        if len(train_loader) % grad_accum != 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad()
-            global_step += 1
-            train_loss    = running_loss / max(running_count, 1)
-            running_loss  = 0.0
-            running_count = 0
-            if args.use_wandb:
-                wandb.log({"train/loss": train_loss,
-                           "train/lr":   scheduler.get_last_lr()[0]},
-                          step=global_step)
-
-        print(f"Epoch {epoch}/{args.num_epochs} done.")
+    print(f"Training done ({global_step} steps).")
 
     # ---- Save final model ----
     model.save_pretrained(output_dir / "final")
     tokenizer.save_pretrained(output_dir / "final")
     print(f"\nFinal model saved → {output_dir / 'final'}")
 
-    # ---- Train loss drop summary ----
+    # ---- Test evaluation (best checkpoint) ----
+    if test_records is not None:
+        print("\nRunning test evaluation with best checkpoint …")
+        best_ckpt = output_dir / "best"
+        if best_ckpt.exists():
+            test_model = AutoModelForCausalLM.from_pretrained(
+                best_ckpt, torch_dtype=torch.bfloat16, trust_remote_code=True
+            ).to(policy_device)
+            sync_weights_to_vllm(llm, test_model)
+            del test_model
+        else:
+            # No best checkpoint saved — use current (final) weights
+            print("  No best checkpoint found, using final weights.")
+            sync_weights_to_vllm(llm, model)
+
+        test_loader = DataLoader(
+            MathSFTDataset(test_records),
+            batch_size=args.train_batch_size,
+            shuffle=False,
+            collate_fn=collate,
+        )
+        test_loss, test_entropy = evaluate_val_metrics(model, test_loader, policy_device)
+        test_acc = vllm_accuracy(
+            llm, test_records, args.max_new_tokens,
+            eos_token=tokenizer.eos_token,
+        )
+        print(
+            f"Test results (best ckpt):  "
+            f"loss={test_loss:.4f}  entropy={test_entropy:.4f}  acc={test_acc:.3f}"
+        )
+        if args.use_wandb:
+            wandb.log({
+                "test/loss":    test_loss,
+                "test/entropy": test_entropy,
+                "test/acc":     test_acc,
+            }, step=global_step)
+
     if args.use_wandb:
         wandb.finish()
 
