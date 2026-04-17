@@ -7,7 +7,6 @@
 #SBATCH --time=04:00:00
 #SBATCH --gres=gpu:a100:2
 #SBATCH --requeue
-#SBATCH --array=0-9%2
 
 DATASET_DIR="/scratch/dns5508/dataset/intellect_math"
 MODEL_DIR="/scratch/dns5508/model_V2"
@@ -49,50 +48,62 @@ for SIZE in "${DATA_SIZES[@]}"; do
     done
 done
 
-SIZE=${SIZES_LIST[$SLURM_ARRAY_TASK_ID]}
-LR=${LRS_LIST[$SLURM_ARRAY_TASK_ID]}
-BS=${BSS_LIST[$SLURM_ARRAY_TASK_ID]}
+mkdir -p ./logs
 
-SIZE_TAG=${SIZE:-full}
-NUM_STEPS=${STEPS_MAP[$SIZE_TAG]}
-EVAL_STEPS=${EVAL_STEPS_MAP[$SIZE_TAG]}
-RUN_NAME="sft_${SIZE_TAG}_bs${BS}_lr${LR}"
+echo "############### Sweep start: $(date +%Y-%m-%d_%H:%M:%S) ###############"
+echo "Total runs: ${#SIZES_LIST[@]}"
 
-echo "############### Run Log: $(date +%Y-%m-%d_%H:%M:%S) ###############"
-echo "SLURM_ARRAY_TASK_ID: $SLURM_ARRAY_TASK_ID"
+for i in "${!SIZES_LIST[@]}"; do
+    SIZE=${SIZES_LIST[$i]}
+    LR=${LRS_LIST[$i]}
+    BS=${BSS_LIST[$i]}
+
+    SIZE_TAG=${SIZE:-full}
+    NUM_STEPS=${STEPS_MAP[$SIZE_TAG]}
+    EVAL_STEPS=${EVAL_STEPS_MAP[$SIZE_TAG]}
+    RUN_NAME="sft_${SIZE_TAG}_bs${BS}_lr${LR}"
+
+    echo "=============================="
+    echo "Run $((i+1))/${#SIZES_LIST[@]}: $RUN_NAME"
+    echo "Samples: ${SIZE:-FULL} | Steps: $NUM_STEPS | Eval every: $EVAL_STEPS"
+    echo "Batch: $BS (grad_accum=$GRAD_ACCUM) | LR: $LR"
+    echo "=============================="
+
+    singularity exec --bind /scratch --nv \
+      --overlay /scratch/dns5508/env/another__overlay-25GB-500K.ext3:ro \
+      /scratch/dns5508/ubuntu-20.04.3.sif \
+      /bin/bash -c "
+      source /ext3/miniconda3/etc/profile.d/conda.sh
+      export PATH=/home/dns5508/.local/bin:\$PATH
+      conda activate llmr
+      cd /scratch/dns5508/LLMReasonersAssignment3
+
+      python3 -m student.sft_trainer \
+        --train_data_path ${DATASET_DIR}/train/data.json \
+        --eval_data_path  ${VAL_DATA} \
+        --test_data_path  ${TEST_DATA} \
+        --output_dir      ${MODEL_DIR} \
+        --run_name        ${RUN_NAME} \
+        --num_train_steps ${NUM_STEPS} \
+        --train_batch_size ${BS} \
+        --grad_accum_steps ${GRAD_ACCUM} \
+        --learning_rate   ${LR} \
+        --eval_steps      ${EVAL_STEPS} \
+        $( [ -n "$SIZE" ] && echo "--max_train_samples $SIZE" ) \
+        --device      cuda:0 \
+        --eval_device cuda:1 \
+        --gpu_memory_utilization 0.85 \
+        --use_wandb
+      "
+
+    STATUS=$?
+    if [ $STATUS -eq 0 ]; then
+        echo "SUCCESS: $RUN_NAME"
+    else
+        echo "FAILED:  $RUN_NAME (exit $STATUS)"
+    fi
+done
+
 echo "=============================="
-echo "Run:     $RUN_NAME"
-echo "Samples: ${SIZE:-FULL}"
-echo "Steps:   $NUM_STEPS  | Eval every: $EVAL_STEPS"
-echo "Batch:   $BS (grad_accum=$GRAD_ACCUM) | LR: $LR"
+echo "SWEEP COMPLETE: $(date +%Y-%m-%d_%H:%M:%S)"
 echo "=============================="
-
-mkdir -p ./sft_logs
-
-singularity exec --bind /scratch --nv \
-  --overlay /scratch/dns5508/env/another__overlay-25GB-500K.ext3:ro \
-  /scratch/dns5508/ubuntu-20.04.3.sif \
-  /bin/bash -c "
-  source /ext3/miniconda3/etc/profile.d/conda.sh
-  export PATH=/home/dns5508/.local/bin:\$PATH
-  conda activate llmr
-  cd /scratch/dns5508/LLMReasonersAssignment3
-
-  python3 -m student.sft_trainer \
-    --train_data_path ${DATASET_DIR}/train/data.json \
-    --eval_data_path  ${VAL_DATA} \
-    --test_data_path  ${TEST_DATA} \
-    --output_dir      ${MODEL_DIR} \
-    --run_name        ${RUN_NAME} \
-    --num_train_steps ${NUM_STEPS} \
-    --train_batch_size ${BS} \
-    --grad_accum_steps ${GRAD_ACCUM} \
-    --learning_rate   ${LR} \
-    --eval_steps      ${EVAL_STEPS} \
-    $( [ -n "$SIZE" ] && echo "--max_train_samples $SIZE" ) \
-    --device      cuda:0 \
-    --eval_device cuda:1 \
-    --use_wandb
-  "
-
-echo "Done: $(date +%Y-%m-%d_%H:%M:%S)"

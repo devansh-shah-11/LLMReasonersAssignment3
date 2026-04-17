@@ -58,6 +58,7 @@ def parse_args():
 
     # Eval
     p.add_argument("--max_new_tokens",type=int, default=1024)
+    p.add_argument("--gpu_memory_utilization", type=float, default=0.45)
 
     # Devices
     p.add_argument("--device",       type=str, default="cuda:0",
@@ -179,7 +180,7 @@ def is_correct(pred: str, gold: str) -> bool:
 # vLLM
 # ---------------------------------------------------------------------------
 
-def init_vllm(model_name: str, dtype: str = "bfloat16") -> LLM:
+def init_vllm(model_name: str, gpu_memory_utilization: float = 0.45, dtype: str = "bfloat16") -> LLM:
     print(f"[vLLM] Starting engine on cuda:1 (remapped) …")
     vllm_set_random_seed(42)
     # Monkeypatch from TRL: patch world_size so vLLM doesn't think it's in
@@ -195,7 +196,7 @@ def init_vllm(model_name: str, dtype: str = "bfloat16") -> LLM:
             model=model_name,
             device="cuda:1",
             dtype=torch.bfloat16,
-            gpu_memory_utilization=0.45,
+            gpu_memory_utilization=gpu_memory_utilization,
             enable_prefix_caching=True,
             trust_remote_code=True,
         )
@@ -335,7 +336,7 @@ def train(args):
 
     # ---- vLLM engine (must init BEFORE policy model for a clean memory baseline) ----
     torch.cuda.empty_cache()
-    llm = init_vllm(args.model_name)
+    llm = init_vllm(args.model_name, gpu_memory_utilization=args.gpu_memory_utilization)
 
     # ---- Policy model (loaded after vLLM so its memory profiling baseline is clean) ----
     model = AutoModelForCausalLM.from_pretrained(
