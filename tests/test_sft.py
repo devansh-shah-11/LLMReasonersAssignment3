@@ -1,12 +1,11 @@
 import torch
 
-from .adapters import (
-    run_compute_entropy as compute_entropy,
-    run_get_response_log_probs as get_response_log_probs,
-    run_masked_normalize as masked_normalize,
-    run_tokenize_prompt_and_output as tokenize_prompt_and_output,
-    run_sft_microbatch_train_step as sft_microbatch_train_step,
-)
+from .adapters import run_compute_entropy as compute_entropy
+from .adapters import run_get_response_log_probs as get_response_log_probs
+from .adapters import run_masked_normalize as masked_normalize
+from .adapters import run_sft_microbatch_train_step as sft_microbatch_train_step
+from .adapters import run_tokenize_prompt_and_output as tokenize_prompt_and_output
+
 
 def test_tokenize_prompt_and_output(numpy_snapshot, prompt_strs, output_strs, tokenizer):
     output = tokenize_prompt_and_output(
@@ -15,6 +14,7 @@ def test_tokenize_prompt_and_output(numpy_snapshot, prompt_strs, output_strs, to
         tokenizer=tokenizer,
     )
     numpy_snapshot.assert_match(output)
+
 
 def test_compute_entropy(numpy_snapshot, logits):
     output = compute_entropy(logits)
@@ -34,6 +34,7 @@ def test_get_response_log_probs(
         return_token_entropy=True,
     )
     numpy_snapshot.assert_match(output)
+
 
 def test_masked_normalize_dim0(numpy_snapshot, tensor, mask, normalize_constant):
     output = masked_normalize(
@@ -73,6 +74,7 @@ def test_masked_normalize_dimNone(numpy_snapshot, tensor, mask, normalize_consta
     )
     numpy_snapshot.assert_match(output)
 
+
 def test_sft_microbatch_train_step(
     numpy_snapshot,
     policy_log_probs,
@@ -88,6 +90,7 @@ def test_sft_microbatch_train_step(
     )
     output = {"loss": loss, "policy_log_probs_grad": policy_log_probs.grad}
     numpy_snapshot.assert_match(output)
+
 
 def test_sft_microbatch_train_step_normalize(
     numpy_snapshot,
@@ -105,6 +108,7 @@ def test_sft_microbatch_train_step_normalize(
     )
     output = {"loss": loss, "policy_log_probs_grad": policy_log_probs.grad}
     numpy_snapshot.assert_match(output)
+
 
 def test_sft_microbatch_train_step_10_steps(
     numpy_snapshot,

@@ -16,6 +16,7 @@ dependencies = [
     "tqdm>=4.67.1",
     "transformers>=4.45.0,<4.49.0",
     "typer>=0.15.4",
+    "wandb>=0.16.0",
     "xopen>=2.0.2",
     "datasets>=3.0.0",
 ]
@@ -30,4 +31,3 @@ package = true
 log_cli = true
 log_cli_level = "WARNING"
 addopts = "--ignore=student/evaluate_test.py"
-

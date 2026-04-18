@@ -1,8 +1,8 @@
 import argparse
 import json
 import os
-import re
 import random
+import re
 from collections import Counter
 from typing import Literal
 from unittest.mock import patch
@@ -10,7 +10,12 @@ from unittest.mock import patch
 import torch
 import torch.nn as nn
 import wandb
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, get_cosine_schedule_with_warmup
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    PreTrainedModel,
+    get_cosine_schedule_with_warmup,
+)
 
 from student.sft_helper import (
     compute_group_normalized_rewards,
@@ -18,6 +23,7 @@ from student.sft_helper import (
     grpo_microbatch_train_step,
     tokenize_prompt_and_output,
 )
+
 
 def load_countdown_prompt(prompt_file: str) -> str:
     """Load the countdown prompt template from disk."""
@@ -39,6 +45,7 @@ def load_countdown_dataset(data_path: str, split: str) -> list[dict]:
     if os.path.isdir(arrow_path):
         try:
             from datasets import load_from_disk
+
             ds = load_from_disk(arrow_path)
             print(f"[data] Arrow dataset from {arrow_path}, cols={ds.column_names}")
             return _normalise_hf_dataset(ds)
@@ -53,6 +60,7 @@ def load_countdown_dataset(data_path: str, split: str) -> list[dict]:
     if os.path.exists(parquet_path):
         try:
             import pandas as pd
+
             df = pd.read_parquet(parquet_path)
             print(f"[data] Parquet {parquet_path}, cols={list(df.columns)}")
             return _normalise_df(df)
@@ -66,13 +74,15 @@ def load_countdown_dataset(data_path: str, split: str) -> list[dict]:
 
 
 def _normalise_hf_dataset(ds) -> list[dict]:
-    return [{"target": int(ds["target"][i]), "numbers": list(ds["nums"][i])}
-            for i in range(len(ds))]
+    return [
+        {"target": int(ds["target"][i]), "numbers": list(ds["nums"][i])} for i in range(len(ds))
+    ]
 
 
 def _normalise_df(df) -> list[dict]:
-    return [{"target": int(row["target"]), "numbers": list(row["nums"])}
-            for _, row in df.iterrows()]
+    return [
+        {"target": int(row["target"]), "numbers": list(row["nums"])} for _, row in df.iterrows()
+    ]
 
 
 def build_prompt(example: dict, prompt_template: str) -> str:
@@ -102,10 +112,12 @@ def build_prompt(example: dict, prompt_template: str) -> str:
 
 def build_ground_truth(example: dict) -> str:
     """JSON string consumed by the reward function."""
-    return json.dumps({
-        "target": int(example["target"]),
-        "numbers": sorted(int(n) for n in example["numbers"]),
-    })
+    return json.dumps(
+        {
+            "target": int(example["target"]),
+            "numbers": sorted(int(n) for n in example["numbers"]),
+        }
+    )
 
 
 def _try_evaluate(expr: str):
@@ -179,8 +191,7 @@ def countdown_reward_fn(response: str, ground_truth: str) -> dict[str, float]:
     return {"reward": 0.0, "format_reward": 1.0, "answer_reward": 0.0}
 
 
-def init_vllm(model_id: str, device: str, seed: int,
-              gpu_memory_utilization: float = 0.85):
+def init_vllm(model_id: str, device: str, seed: int, gpu_memory_utilization: float = 0.85):
     """
     Initialise a vLLM LLM on one specific GPU.
     Monkeypatches from TRL bypass world-size / profiling checks that break
@@ -243,8 +254,9 @@ def generate_rollouts(
 
 
 @torch.no_grad()
-def evaluate(llm, examples: list[dict], prompt_template: str,
-             n_eval: int, max_tokens: int) -> dict[str, float]:
+def evaluate(
+    llm, examples: list[dict], prompt_template: str, n_eval: int, max_tokens: int
+) -> dict[str, float]:
     """Greedy evaluation on first n_eval validation examples."""
     from vllm import SamplingParams
 
@@ -252,8 +264,7 @@ def evaluate(llm, examples: list[dict], prompt_template: str,
     prompts = [build_prompt(ex, prompt_template) for ex in subset]
     gts = [build_ground_truth(ex) for ex in subset]
 
-    params = SamplingParams(temperature=0.0, max_tokens=max_tokens,
-                            stop=["</answer>"])
+    params = SamplingParams(temperature=0.0, max_tokens=max_tokens, stop=["</answer>"])
     outputs = llm.generate(prompts, sampling_params=params)
     responses = [out.outputs[0].text + "</answer>" for out in outputs]
 
@@ -306,20 +317,21 @@ def grpo_train(
     random.seed(seed)
 
     # ---- sanity checks -------------------------------------------------- #
-    assert rollout_batch_size % group_size == 0, \
-        "rollout_batch_size must be divisible by group_size"
+    assert (
+        rollout_batch_size % group_size == 0
+    ), "rollout_batch_size must be divisible by group_size"
     n_prompts_per_rollout = rollout_batch_size // group_size
 
     # train_batch_size is derived: all rollout samples across all epochs
     train_batch_size = rollout_batch_size * epochs_per_rollout_batch
-    assert train_batch_size % gradient_accumulation_steps == 0, \
-        "rollout_batch_size * epochs_per_rollout_batch must be divisible by gradient_accumulation_steps"
+    assert (
+        train_batch_size % gradient_accumulation_steps == 0
+    ), "rollout_batch_size * epochs_per_rollout_batch must be divisible by gradient_accumulation_steps"
     micro_bs = train_batch_size // gradient_accumulation_steps
-    n_micro  = rollout_batch_size // micro_bs
+    n_micro = rollout_batch_size // micro_bs
 
     if epochs_per_rollout_batch > 1:
-        assert loss_type == "grpo_clip", \
-            "Multi-epoch training requires loss_type='grpo_clip'"
+        assert loss_type == "grpo_clip", "Multi-epoch training requires loss_type='grpo_clip'"
 
     run_suffix_parts = [f"lr{learning_rate}", f"loss{loss_type}"]
     if use_length_normalize:
@@ -336,11 +348,16 @@ def grpo_train(
         project=wandb_project,
         name=wandb_run_name,
         config=dict(
-            model_id=model_id, n_grpo_steps=n_grpo_steps,
-            learning_rate=learning_rate, rollout_batch_size=rollout_batch_size,
-            group_size=group_size, train_batch_size=train_batch_size,
-            micro_bs=micro_bs, gradient_accumulation_steps=gradient_accumulation_steps,
-            loss_type=loss_type, use_std_normalization=use_std_normalization,
+            model_id=model_id,
+            n_grpo_steps=n_grpo_steps,
+            learning_rate=learning_rate,
+            rollout_batch_size=rollout_batch_size,
+            group_size=group_size,
+            train_batch_size=train_batch_size,
+            micro_bs=micro_bs,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            loss_type=loss_type,
+            use_std_normalization=use_std_normalization,
             epochs_per_rollout_batch=epochs_per_rollout_batch,
             use_length_normalize=use_length_normalize,
         ),
@@ -348,12 +365,12 @@ def grpo_train(
     wandb.define_metric("train_step")
     wandb.define_metric("eval_step")
     wandb.define_metric("train/*", step_metric="train_step")
-    wandb.define_metric("eval/*",  step_metric="eval_step")
+    wandb.define_metric("eval/*", step_metric="eval_step")
 
     print("[data] Loading datasets...")
     train_examples = load_countdown_dataset(data_path, "train")
-    val_examples   = load_countdown_dataset(data_path, "dev")
-    test_examples  = load_countdown_dataset(data_path, "test")
+    val_examples = load_countdown_dataset(data_path, "dev")
+    test_examples = load_countdown_dataset(data_path, "test")
     print(f"[data] train={len(train_examples)}, dev={len(val_examples)}, test={len(test_examples)}")
 
     print(f"[model] Loading: {model_id}")
@@ -367,15 +384,20 @@ def grpo_train(
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    print(f"[vllm] Initialising on {vllm_device} "
-          f"(gpu_memory_utilization={gpu_memory_utilization}) ...")
-    llm = init_vllm(model_id, device=vllm_device, seed=seed,
-                    gpu_memory_utilization=gpu_memory_utilization)
+    print(
+        f"[vllm] Initialising on {vllm_device} "
+        f"(gpu_memory_utilization={gpu_memory_utilization}) ..."
+    )
+    llm = init_vllm(
+        model_id, device=vllm_device, seed=seed, gpu_memory_utilization=gpu_memory_utilization
+    )
     print("[vllm] Ready.")
 
     optimizer = torch.optim.AdamW(
-        policy.parameters(), lr=learning_rate,
-        weight_decay=0.0, betas=(0.9, 0.95),
+        policy.parameters(),
+        lr=learning_rate,
+        weight_decay=0.0,
+        betas=(0.9, 0.95),
     )
     warmup_steps = int(warmup_ratio * n_grpo_steps)
     scheduler = get_cosine_schedule_with_warmup(
@@ -399,9 +421,12 @@ def grpo_train(
         ground_truths = [build_ground_truth(ex) for ex in batch_examples]
 
         rollout_responses = generate_rollouts(
-            llm=llm, prompts=prompts, group_size=group_size,
+            llm=llm,
+            prompts=prompts,
+            group_size=group_size,
             temperature=sampling_temperature,
-            max_tokens=sampling_max_tokens, min_tokens=sampling_min_tokens,
+            max_tokens=sampling_max_tokens,
+            min_tokens=sampling_min_tokens,
         )
 
         repeated_prompts = [p for p in prompts for _ in range(group_size)]
@@ -423,8 +448,8 @@ def grpo_train(
             output_strs=rollout_responses,
             tokenizer=tokenizer,
         )
-        all_input_ids = tokenized["input_ids"]      # (rollout_bs, T-1)
-        all_labels    = tokenized["labels"]         # (rollout_bs, T-1)
+        all_input_ids = tokenized["input_ids"]  # (rollout_bs, T-1)
+        all_labels = tokenized["labels"]  # (rollout_bs, T-1)
         all_resp_mask = tokenized["response_mask"]  # (rollout_bs, T-1)
 
         # (rollout_bs, 1) for broadcasting over sequence length
@@ -459,12 +484,13 @@ def grpo_train(
                 mb_mask = all_resp_mask[idx].to(policy_device)
                 mb_adv = adv_col[idx]
                 mb_rwd = rwd_col[idx]
-                mb_old_lp = (old_log_probs_all[idx]
-                             if old_log_probs_all is not None else None)
+                mb_old_lp = old_log_probs_all[idx] if old_log_probs_all is not None else None
 
                 policy.train()
                 lp_out = get_response_log_probs(
-                    model=policy, input_ids=mb_ids, labels=mb_labels,
+                    model=policy,
+                    input_ids=mb_ids,
+                    labels=mb_labels,
                     return_token_entropy=True,
                 )
                 policy_lp = lp_out["log_probs"]
@@ -519,16 +545,20 @@ def grpo_train(
             load_policy_into_vllm_instance(policy, llm)
 
             eval_metrics = evaluate(
-                llm=llm, examples=val_examples,
+                llm=llm,
+                examples=val_examples,
                 prompt_template=prompt_template,
-                n_eval=n_eval_examples, max_tokens=sampling_max_tokens,
+                n_eval=n_eval_examples,
+                max_tokens=sampling_max_tokens,
             )
             eval_metrics["eval_step"] = eval_step
             wandb.log(eval_metrics)
             eval_step += 1
 
-            print(f"  answer_reward={eval_metrics['eval/answer_reward']:.3f}  "
-                  f"format_reward={eval_metrics['eval/format_reward']:.3f}")
+            print(
+                f"  answer_reward={eval_metrics['eval/answer_reward']:.3f}  "
+                f"format_reward={eval_metrics['eval/format_reward']:.3f}"
+            )
 
             print(f"\n  === Sample rollouts (step {grpo_step}) ===")
             for i in range(min(n_sample_rollouts, len(rollout_responses))):
@@ -539,23 +569,29 @@ def grpo_train(
                 print(f"       resp[:300]: {resp[:300]!r}")
                 print(f"       reward={rwd}\n")
 
-        print(f"[step {grpo_step:4d}/{n_grpo_steps}] "
-              f"loss={agg_loss:.4f}  "
-              f"mean_rwd={reward_meta['mean_raw_reward']:.3f}  "
-              f"grad={grad_norm.item():.3f}")
+        print(
+            f"[step {grpo_step:4d}/{n_grpo_steps}] "
+            f"loss={agg_loss:.4f}  "
+            f"mean_rwd={reward_meta['mean_raw_reward']:.3f}  "
+            f"grad={grad_norm.item():.3f}"
+        )
 
     # ---- Final test set evaluation -------------------------------------- #
     print(f"\n[test] Evaluating on test set ({n_test_examples} examples)...")
     load_policy_into_vllm_instance(policy, llm)
     test_metrics = evaluate(
-        llm=llm, examples=test_examples,
+        llm=llm,
+        examples=test_examples,
         prompt_template=prompt_template,
-        n_eval=n_test_examples, max_tokens=sampling_max_tokens,
+        n_eval=n_test_examples,
+        max_tokens=sampling_max_tokens,
     )
     test_metrics_logged = {f"test/{k.split('/')[-1]}": v for k, v in test_metrics.items()}
     wandb.log(test_metrics_logged)
-    print(f"  [test] answer_reward={test_metrics['eval/answer_reward']:.3f}  "
-          f"format_reward={test_metrics['eval/format_reward']:.3f}")
+    print(
+        f"  [test] answer_reward={test_metrics['eval/answer_reward']:.3f}  "
+        f"format_reward={test_metrics['eval/format_reward']:.3f}"
+    )
 
     print(f"\n[done] Saving to {output_dir}")
     policy.save_pretrained(output_dir)
@@ -568,12 +604,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="GRPO training on Countdown")
 
     # Paths
-    parser.add_argument("--data_path", type=str,
-                        default="/scratch/dns5508/dataset/countdown")
-    parser.add_argument("--prompt_file", type=str,
-                        default="student/prompts/countdown.prompt")
-    parser.add_argument("--model_id", type=str,
-                        default="Qwen/Qwen2.5-Math-1.5B-Instruct")
+    parser.add_argument("--data_path", type=str, default="/scratch/dns5508/dataset/countdown")
+    parser.add_argument("--prompt_file", type=str, default="student/prompts/countdown.prompt")
+    parser.add_argument("--model_id", type=str, default="Qwen/Qwen2.5-Math-1.5B-Instruct")
     parser.add_argument("--output_dir", type=str, default="./grpo_output")
 
     # Devices
@@ -591,12 +624,16 @@ if __name__ == "__main__":
     parser.add_argument("--sampling_temperature", type=float, default=0.7)
     parser.add_argument("--sampling_max_tokens", type=int, default=1024)
     parser.add_argument("--sampling_min_tokens", type=int, default=4)
-    parser.add_argument("--loss_type", type=str,
-                        default="reinforce_with_baseline",
-                        choices=["no_baseline", "reinforce_with_baseline", "grpo_clip"])
+    parser.add_argument(
+        "--loss_type",
+        type=str,
+        default="reinforce_with_baseline",
+        choices=["no_baseline", "reinforce_with_baseline", "grpo_clip"],
+    )
     parser.add_argument("--use_std_normalization", action="store_true", default=True)
-    parser.add_argument("--no_std_normalization", dest="use_std_normalization",
-                        action="store_false")
+    parser.add_argument(
+        "--no_std_normalization", dest="use_std_normalization", action="store_false"
+    )
     parser.add_argument("--cliprange", type=float, default=0.2)
     parser.add_argument("--advantage_eps", type=float, default=1e-6)
     parser.add_argument("--use_length_normalize", action="store_true", default=False)

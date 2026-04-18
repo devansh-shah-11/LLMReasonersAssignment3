@@ -4,6 +4,7 @@ import os
 import random
 import re
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -12,63 +13,88 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup
 from vllm import LLM, SamplingParams
-from unittest.mock import patch
 from vllm.model_executor import set_random_seed as vllm_set_random_seed
 
 from student.sft_helper import (
-    tokenize_prompt_and_output,
     get_response_log_probs,
     sft_microbatch_train_step,
+    tokenize_prompt_and_output,
 )
+
 
 def parse_args():
     p = argparse.ArgumentParser()
 
     # Paths (match sbatch script exactly)
     p.add_argument("--train_data_path", type=str, required=True)
-    p.add_argument("--eval_data_path",  type=str, required=True)
-    p.add_argument("--test_data_path",  type=str, default=None,
-                   help="Optional held-out test set. Evaluated once with the best checkpoint.")
+    p.add_argument("--eval_data_path", type=str, required=True)
+    p.add_argument(
+        "--test_data_path",
+        type=str,
+        default=None,
+        help="Optional held-out test set. Evaluated once with the best checkpoint.",
+    )
     p.add_argument("--output_dir", type=str, required=True)
     p.add_argument("--run_name", type=str, default="sft_run")
 
     # Training
-    p.add_argument("--num_train_steps", type=int, default=None,
-                   help="Total optimizer steps. If set, overrides --num_epochs.")
-    p.add_argument("--num_epochs", type=int,   default=3,
-                   help="Number of epochs (ignored when --num_train_steps is set).")
-    p.add_argument("--train_batch_size", type=int,   default=2,
-                   help="Physical per-step batch size (DataLoader batch_size).")
-    p.add_argument("--grad_accum_steps", type=int,   default=16,
-                   help="Gradient accumulation steps.")
-    p.add_argument("--learning_rate",    type=float, default=2e-5)
-    p.add_argument("--max_train_samples",type=int,   default=None,
-                   help="Cap on unique training examples. Omit for full dataset.")
-    p.add_argument("--max_seq_len",  type=int,   default=1024)
+    p.add_argument(
+        "--num_train_steps",
+        type=int,
+        default=None,
+        help="Total optimizer steps. If set, overrides --num_epochs.",
+    )
+    p.add_argument(
+        "--num_epochs",
+        type=int,
+        default=3,
+        help="Number of epochs (ignored when --num_train_steps is set).",
+    )
+    p.add_argument(
+        "--train_batch_size",
+        type=int,
+        default=2,
+        help="Physical per-step batch size (DataLoader batch_size).",
+    )
+    p.add_argument("--grad_accum_steps", type=int, default=16, help="Gradient accumulation steps.")
+    p.add_argument("--learning_rate", type=float, default=2e-5)
+    p.add_argument(
+        "--max_train_samples",
+        type=int,
+        default=None,
+        help="Cap on unique training examples. Omit for full dataset.",
+    )
+    p.add_argument("--max_seq_len", type=int, default=1024)
     p.add_argument("--warmup_ratio", type=float, default=0.1)
     p.add_argument("--weight_decay", type=float, default=0.0)
-    p.add_argument("--eval_steps", type=int, default=None,
-                   help="Evaluate every N optimizer steps. Defaults to total_steps // 20.")
-    p.add_argument("--min_eval_steps", type=int,   default=1,
-                   help="Minimum steps between evaluations (prevents too-frequent evals on small datasets).")
-    p.add_argument("--seed", type=int,   default=42)
+    p.add_argument(
+        "--eval_steps",
+        type=int,
+        default=None,
+        help="Evaluate every N optimizer steps. Defaults to total_steps // 20.",
+    )
+    p.add_argument(
+        "--min_eval_steps",
+        type=int,
+        default=1,
+        help="Minimum steps between evaluations (prevents too-frequent evals on small datasets).",
+    )
+    p.add_argument("--seed", type=int, default=42)
 
     # Model
     p.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-Math-1.5B")
 
     # Eval
-    p.add_argument("--max_new_tokens",type=int, default=1024)
+    p.add_argument("--max_new_tokens", type=int, default=1024)
     p.add_argument("--gpu_memory_utilization", type=float, default=0.45)
 
     # Devices
-    p.add_argument("--device",       type=str, default="cuda:0",
-                   help="Device for policy model.")
-    p.add_argument("--eval_device",  type=str, default="cuda:1",
-                   help="Device for vLLM engine.")
+    p.add_argument("--device", type=str, default="cuda:0", help="Device for policy model.")
+    p.add_argument("--eval_device", type=str, default="cuda:1", help="Device for vLLM engine.")
 
     # Logging
-    p.add_argument("--use_wandb",      action="store_true")
-    p.add_argument("--wandb_project",  type=str, default="sft_math3")
+    p.add_argument("--use_wandb", action="store_true")
+    p.add_argument("--wandb_project", type=str, default="sft_math3")
 
     return p.parse_args()
 
@@ -87,7 +113,7 @@ def build_prompt_and_output(record: dict) -> tuple[str, str]:
     """Extract (prompt_str, output_str) from a messages record."""
     system_content = user_content = assistant_content = ""
     for msg in record["messages"]:
-        role    = msg.get("role", "")
+        role = msg.get("role", "")
         content = msg.get("content", "")
         if role == "system":
             system_content = content
@@ -115,8 +141,8 @@ class MathSFTDataset(Dataset):
         record = self.records[idx]
         prompt, output = build_prompt_and_output(record)
         return {
-            "prompt":       prompt,
-            "output":       output,
+            "prompt": prompt,
+            "output": output,
             "ground_truth": record.get("ground_truth", ""),
         }
 
@@ -132,6 +158,7 @@ def make_collate_fn(tokenizer, max_seq_len: int):
             result[k] = result[k][:, :max_seq_len]
         result["ground_truths"] = [b["ground_truth"] for b in batch]
         return result
+
     return _collate
 
 
@@ -144,19 +171,19 @@ _LAST_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
 def _extract_boxed(text: str) -> str | None:
     """Extract the last \\boxed{...} content, handling nested braces."""
-    idx = text.rfind(r'\boxed{')
+    idx = text.rfind(r"\boxed{")
     if idx == -1:
         return None
-    start = idx + len(r'\boxed{')
+    start = idx + len(r"\boxed{")
     depth = 1
     i = start
     while i < len(text) and depth > 0:
-        if text[i] == '{':
+        if text[i] == "{":
             depth += 1
-        elif text[i] == '}':
+        elif text[i] == "}":
             depth -= 1
         i += 1
-    return text[start:i - 1] if depth == 0 else None
+    return text[start : i - 1] if depth == 0 else None
 
 
 def extract_answer(text: str) -> str:
@@ -180,7 +207,10 @@ def is_correct(pred: str, gold: str) -> bool:
 # vLLM
 # ---------------------------------------------------------------------------
 
-def init_vllm(model_name: str, gpu_memory_utilization: float = 0.45, dtype: str = "bfloat16") -> LLM:
+
+def init_vllm(
+    model_name: str, gpu_memory_utilization: float = 0.45, dtype: str = "bfloat16"
+) -> LLM:
     print(f"[vLLM] Starting engine on cuda:1 (remapped) …")
     vllm_set_random_seed(42)
     # Monkeypatch from TRL: patch world_size so vLLM doesn't think it's in
@@ -207,13 +237,7 @@ def init_vllm(model_name: str, gpu_memory_utilization: float = 0.45, dtype: str 
 def sync_weights_to_vllm(llm: LLM, policy_model):
     """Copy policy weights directly into the live vLLM engine (in-memory, no disk I/O)."""
     state_dict = policy_model.state_dict()
-    llm_model = (
-        llm.llm_engine
-           .model_executor
-           .driver_worker
-           .model_runner
-           .model
-    )
+    llm_model = llm.llm_engine.model_executor.driver_worker.model_runner.model
     llm_model.load_weights(state_dict.items())
 
 
@@ -224,7 +248,7 @@ def vllm_accuracy(
     eos_token: str | None = None,
 ) -> float:
     prompts = [build_prompt_and_output(r)[0] for r in records]
-    golds   = [r.get("ground_truth", "") for r in records]
+    golds = [r.get("ground_truth", "") for r in records]
 
     stop = ["\n\n\n"]
     if eos_token:
@@ -249,6 +273,7 @@ def vllm_accuracy(
 # Val loss + entropy (on policy GPU, no generation needed)
 # ---------------------------------------------------------------------------
 
+
 @torch.no_grad()
 def evaluate_val_metrics(
     model,
@@ -260,20 +285,20 @@ def evaluate_val_metrics(
     total_loss = total_entropy = total_tokens = 0.0
 
     for batch in loader:
-        input_ids     = batch["input_ids"].to(device)
-        labels        = batch["labels"].to(device)
+        input_ids = batch["input_ids"].to(device)
+        labels = batch["labels"].to(device)
         response_mask = batch["response_mask"].to(device)
 
-        out       = get_response_log_probs(model, input_ids, labels, return_token_entropy=True)
+        out = get_response_log_probs(model, input_ids, labels, return_token_entropy=True)
         log_probs = out["log_probs"]
-        entropy   = out["token_entropy"]
-        mask_f    = response_mask.float()
-        n         = mask_f.sum().item()
+        entropy = out["token_entropy"]
+        mask_f = response_mask.float()
+        n = mask_f.sum().item()
 
         if n > 0:
-            total_loss    += -(log_probs * mask_f).sum().item()
-            total_entropy +=  (entropy   * mask_f).sum().item()
-            total_tokens  += n
+            total_loss += -(log_probs * mask_f).sum().item()
+            total_entropy += (entropy * mask_f).sum().item()
+            total_tokens += n
 
     if total_tokens == 0:
         return float("inf"), 0.0
@@ -283,6 +308,7 @@ def evaluate_val_metrics(
 # ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
+
 
 def train(args):
     random.seed(args.seed)
@@ -295,11 +321,11 @@ def train(args):
     eval_gpu_idx = int(args.eval_device.split(":")[-1])
     os.environ["CUDA_VISIBLE_DEVICES"] = f"{policy_gpu_idx},{eval_gpu_idx}"
     print(f"[CUDA] Set CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']}")
-    
+
     # After setting CUDA_VISIBLE_DEVICES, use remapped indices (0 for policy, 1 for eval)
     policy_device = torch.device("cuda:0")
     eval_device = "cuda:1"
-    
+
     output_dir = Path(args.output_dir) / args.run_name
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -307,14 +333,14 @@ def train(args):
     print(f"Loading train: {args.train_data_path}")
     train_records = load_jsonl(args.train_data_path)
     print(f"Loading eval:  {args.eval_data_path}")
-    eval_records  = load_jsonl(args.eval_data_path)
-    test_records  = load_jsonl(args.test_data_path) if args.test_data_path else None
+    eval_records = load_jsonl(args.eval_data_path)
+    test_records = load_jsonl(args.test_data_path) if args.test_data_path else None
     if test_records is not None:
         print(f"Loading test:  {args.test_data_path}  ({len(test_records)} examples)")
 
     random.shuffle(train_records)
     if args.max_train_samples:
-        train_records = train_records[:args.max_train_samples]
+        train_records = train_records[: args.max_train_samples]
 
     # filter records with empty assistant outputs
     n_before = len(train_records)
@@ -341,7 +367,7 @@ def train(args):
 
     # ---- DataLoaders ----
     collate = make_collate_fn(tokenizer, args.max_seq_len)
-    grad_accum   = max(1, args.grad_accum_steps)
+    grad_accum = max(1, args.grad_accum_steps)
     train_loader = DataLoader(
         MathSFTDataset(train_records),
         batch_size=args.train_batch_size,
@@ -370,9 +396,9 @@ def train(args):
     else:
         eval_steps = max(args.min_eval_steps, total_steps // 20)
 
-    optimizer = AdamW(model.parameters(), lr=args.learning_rate,
-                      weight_decay=args.weight_decay,
-                      betas=(0.9, 0.95))
+    optimizer = AdamW(
+        model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay, betas=(0.9, 0.95)
+    )
     scheduler = get_cosine_schedule_with_warmup(
         optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps
     )
@@ -393,10 +419,10 @@ def train(args):
             config=vars(args),
         )
 
-    global_step    = 0
-    best_val_loss  = float("inf")
-    running_loss   = 0.0
-    running_count  = 0
+    global_step = 0
+    best_val_loss = float("inf")
+    running_loss = 0.0
+    running_count = 0
     micro_step_buf = 0  # counts micro-steps within current grad-accum window
 
     def _infinite_loader(loader):
@@ -412,11 +438,11 @@ def train(args):
         if global_step >= total_steps:
             break
 
-        input_ids     = batch["input_ids"].to(policy_device)
-        labels        = batch["labels"].to(policy_device)
+        input_ids = batch["input_ids"].to(policy_device)
+        labels = batch["labels"].to(policy_device)
         response_mask = batch["response_mask"].to(policy_device)
 
-        out       = get_response_log_probs(model, input_ids, labels)
+        out = get_response_log_probs(model, input_ids, labels)
         log_probs = out["log_probs"]
 
         scaled_loss, _ = sft_microbatch_train_step(
@@ -425,7 +451,7 @@ def train(args):
             gradient_accumulation_steps=grad_accum,
         )
         # Unscale to get the true per-step loss for logging
-        running_loss  += scaled_loss.item() * grad_accum
+        running_loss += scaled_loss.item() * grad_accum
         running_count += 1
         micro_step_buf += 1
 
@@ -437,26 +463,26 @@ def train(args):
         optimizer.step()
         scheduler.step()
         optimizer.zero_grad()
-        global_step    += 1
-        micro_step_buf  = 0
+        global_step += 1
+        micro_step_buf = 0
 
-        train_loss    = running_loss / running_count
-        running_loss  = 0.0
+        train_loss = running_loss / running_count
+        running_loss = 0.0
         running_count = 0
 
         if args.use_wandb:
-            wandb.log({"train/loss": train_loss,
-                       "train/lr":   scheduler.get_last_lr()[0]},
-                      step=global_step)
+            wandb.log(
+                {"train/loss": train_loss, "train/lr": scheduler.get_last_lr()[0]}, step=global_step
+            )
 
         # ---- Eval ----
         if global_step % eval_steps == 0 or global_step == total_steps:
             sync_weights_to_vllm(llm, model)
-            val_loss, val_entropy = evaluate_val_metrics(
-                model, eval_loader, policy_device
-            )
+            val_loss, val_entropy = evaluate_val_metrics(model, eval_loader, policy_device)
             val_acc = vllm_accuracy(
-                llm, eval_records, args.max_new_tokens,
+                llm,
+                eval_records,
+                args.max_new_tokens,
                 eos_token=tokenizer.eos_token,
             )
 
@@ -469,11 +495,14 @@ def train(args):
             )
 
             if args.use_wandb:
-                wandb.log({
-                    "eval/val_loss":    val_loss,
-                    "eval/val_entropy": val_entropy,
-                    "eval/val_acc":     val_acc,
-                }, step=global_step)
+                wandb.log(
+                    {
+                        "eval/val_loss": val_loss,
+                        "eval/val_entropy": val_entropy,
+                        "eval/val_acc": val_acc,
+                    },
+                    step=global_step,
+                )
 
             # Save best model
             if val_loss < best_val_loss:
@@ -514,7 +543,9 @@ def train(args):
         )
         test_loss, test_entropy = evaluate_val_metrics(model, test_loader, policy_device)
         test_acc = vllm_accuracy(
-            llm, test_records, args.max_new_tokens,
+            llm,
+            test_records,
+            args.max_new_tokens,
             eos_token=tokenizer.eos_token,
         )
         print(
@@ -522,11 +553,14 @@ def train(args):
             f"loss={test_loss:.4f}  entropy={test_entropy:.4f}  acc={test_acc:.3f}"
         )
         if args.use_wandb:
-            wandb.log({
-                "test/loss":    test_loss,
-                "test/entropy": test_entropy,
-                "test/acc":     test_acc,
-            }, step=global_step)
+            wandb.log(
+                {
+                    "test/loss": test_loss,
+                    "test/entropy": test_entropy,
+                    "test/acc": test_acc,
+                },
+                step=global_step,
+            )
 
     if args.use_wandb:
         wandb.finish()

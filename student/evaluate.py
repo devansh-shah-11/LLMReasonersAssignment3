@@ -1,8 +1,9 @@
 """Minimal evaluation script for MATH and Intellect test sets."""
 
 import json
-from pathlib import Path
 import time
+from pathlib import Path
+
 import torch
 from datasets import load_dataset
 from tqdm import tqdm
@@ -16,10 +17,12 @@ from student.drgrpo_grader import question_only_reward_fn
 def _has_cuda():
     return torch.cuda.is_available()
 
+
 def _get_mps_or_cpu():
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
+
 
 def load_prompt(name: str = "intellect") -> str:
     path = Path(__file__).parent / "prompts" / f"{name}.prompt"
@@ -32,6 +35,7 @@ def load_model_vllm(model_id: str, gpu_memory_utilization: float = 0.85):
         trust_remote_code=True,
         gpu_memory_utilization=gpu_memory_utilization,
     )
+
 
 def generate_vllm(llm, prompts, max_tokens=2048, temperature=0.0):
     params = SamplingParams(temperature=temperature, max_tokens=max_tokens)
@@ -53,12 +57,18 @@ def load_model_transformers(model_id: str, device: torch.device):
     model.eval()
     return model, tokenizer
 
-def generate_transformers(model, tokenizer, prompts, device, max_new_tokens=2048, batch_size=1, temperature=0.0):
+
+def generate_transformers(
+    model, tokenizer, prompts, device, max_new_tokens=2048, batch_size=1, temperature=0.0
+):
     do_sample = temperature > 0.0
     all_responses = []
     for i in tqdm(range(0, len(prompts), batch_size), desc="Generating"):
         batch = prompts[i : i + batch_size]
-        print(f"\n  [example {i+1}/{len(prompts)}] generating (max {max_new_tokens} tokens, temp={temperature})...", flush=True)
+        print(
+            f"\n  [example {i+1}/{len(prompts)}] generating (max {max_new_tokens} tokens, temp={temperature})...",
+            flush=True,
+        )
         inputs = tokenizer(
             batch,
             return_tensors="pt",
@@ -82,9 +92,13 @@ def generate_transformers(model, tokenizer, prompts, device, max_new_tokens=2048
         for out in outputs:
             new_tokens = out[prompt_len:]
             text = tokenizer.decode(new_tokens, skip_special_tokens=True)
-            print(f"  → {len(new_tokens)} tokens in {elapsed:.1f}s ({len(new_tokens)/elapsed:.1f} tok/s)", flush=True)
+            print(
+                f"  → {len(new_tokens)} tokens in {elapsed:.1f}s ({len(new_tokens)/elapsed:.1f} tok/s)",
+                flush=True,
+            )
             all_responses.append(text)
     return all_responses
+
 
 def evaluate(responses, prompts, ground_truths, dataset_name="dataset", max_log_examples=10):
     """Grade responses and print category breakdown + examples."""
@@ -95,9 +109,9 @@ def evaluate(responses, prompts, ground_truths, dataset_name="dataset", max_log_
         "neither_correct": [],
     }
 
-    for i, (text, gt) in enumerate(tqdm(
-        zip(responses, ground_truths), total=len(responses), desc="Grading"
-    )):
+    for i, (text, gt) in enumerate(
+        tqdm(zip(responses, ground_truths), total=len(responses), desc="Grading")
+    ):
         reward = question_only_reward_fn(text, gt)
         fmt = reward["format_reward"]
         ans = reward["answer_reward"]
@@ -126,7 +140,7 @@ def evaluate(responses, prompts, ground_truths, dataset_name="dataset", max_log_
     print(f"Correct format but wrong answer: {len(categories['correct_format'])}")
     print(f"Neither format nor answer correct: {len(categories['neither_correct'])}")
     print(f"Total: {len(responses)}")
-    
+
     log_path = Path(__file__).parent / f"eval_log_{dataset_name.replace(' ', '_')}.json"
     with open(log_path, "w") as f:
         json.dump(
@@ -135,7 +149,8 @@ def evaluate(responses, prompts, ground_truths, dataset_name="dataset", max_log_
                 "counts": {k: len(v) for k, v in categories.items()},
                 "examples": {k: v[:20] for k, v in categories.items()},
             },
-            f, indent=2,
+            f,
+            indent=2,
         )
     print(f"\n[Full log saved at {log_path}]")
     return accuracy
@@ -143,13 +158,23 @@ def evaluate(responses, prompts, ground_truths, dataset_name="dataset", max_log_
 
 def main():
     import argparse
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="Qwen/Qwen2.5-Math-1.5B")
     parser.add_argument("--max-examples", type=int, default=500)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.85)
-    parser.add_argument("--batch-size", type=int, default=1, help="Batch size for Transformers backend (ignored for vLLM)")
-    parser.add_argument("--max-new-tokens", type=int, default=2048, help="Max tokens to generate per example")
-    parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature (0.0 = greedy)")
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="Batch size for Transformers backend (ignored for vLLM)",
+    )
+    parser.add_argument(
+        "--max-new-tokens", type=int, default=2048, help="Max tokens to generate per example"
+    )
+    parser.add_argument(
+        "--temperature", type=float, default=0.0, help="Sampling temperature (0.0 = greedy)"
+    )
     parser.add_argument("--max-log-examples", type=int, default=10)
     args = parser.parse_args()
 
@@ -168,11 +193,18 @@ def main():
 
     def run_inference(prompts):
         if use_vllm:
-            return generate_vllm(llm, prompts, max_tokens=args.max_new_tokens, temperature=args.temperature)
+            return generate_vllm(
+                llm, prompts, max_tokens=args.max_new_tokens, temperature=args.temperature
+            )
         else:
             return generate_transformers(
-                model, tokenizer, prompts, device,
-                max_new_tokens=args.max_new_tokens, batch_size=args.batch_size, temperature=args.temperature,
+                model,
+                tokenizer,
+                prompts,
+                device,
+                max_new_tokens=args.max_new_tokens,
+                batch_size=args.batch_size,
+                temperature=args.temperature,
             )
 
     math_ds = load_dataset("hiyouga/math12k", split="test")
@@ -185,9 +217,9 @@ def main():
     print(f"Loaded {len(prompts)} examples")
     print(f"[Sample prompt tail] ...{prompts[0][-200:]}")
     responses = run_inference(prompts)
-    acc = evaluate(responses, prompts, gts,
-                   dataset_name="MATH",
-                   max_log_examples=args.max_log_examples)
+    acc = evaluate(
+        responses, prompts, gts, dataset_name="MATH", max_log_examples=args.max_log_examples
+    )
     print(f"\nMATH Accuracy: {acc:.4f}")
 
 

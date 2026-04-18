@@ -1,4 +1,5 @@
 from typing import Callable
+
 import torch
 import torch.nn.functional as F
 from transformers import PreTrainedTokenizerBase
@@ -16,7 +17,7 @@ def tokenize_prompt_and_output(
         output_strs: list[str] of output/response strings.
         tokenizer: HuggingFace tokenizer.
     """
-    
+
     # Tokenize prompts and outputs seperately
     prompt_ids_list = [tokenizer.encode(p, add_special_tokens=False) for p in prompt_strs]
     output_ids_list = [tokenizer.encode(o, add_special_tokens=False) for o in output_strs]
@@ -30,13 +31,13 @@ def tokenize_prompt_and_output(
         full_ids_list.append(full_ids)
         if len(full_ids) > max_full_len:
             max_full_len = len(full_ids)
-    
+
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
 
     # Pad full_ids
     padded = torch.full((batch_size, max_full_len), pad_id, dtype=torch.long)
     response_mask_full = torch.zeros(batch_size, max_full_len, dtype=torch.long)
-    
+
     # Create response_mask: 0 for prompt tokens, 1 for output tokens
     for i, (full_ids, prompt_ids, output_ids) in enumerate(
         zip(full_ids_list, prompt_ids_list, output_ids_list)
@@ -135,10 +136,10 @@ def compute_group_normalized_rewards(
     normalize_by_std: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
     """Compute group-normalized rewards for GRPO.
-    
+
     For each group of `group_size` rollouts per prompt, normalize rewards
     within the group. Optionally normalize by the group's standard deviation.
-    
+
     Args:
         reward_fn: Callable[[str, str], dict[str, float]], reward function
         rollout_responses: list[str], all rollout responses (length = n_prompts * group_size)
@@ -146,7 +147,7 @@ def compute_group_normalized_rewards(
         group_size: int, number of rollouts per prompt
         advantage_eps: float, epsilon for numerical stability
         normalize_by_std: bool, whether to normalize by group std
-    
+
     Returns:
         tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
             - normalized_rewards: (batch_size,) tensor of normalized advantages
@@ -155,7 +156,7 @@ def compute_group_normalized_rewards(
     """
     batch_size = len(rollout_responses)
     n_groups = batch_size // group_size
-    
+
     # Compute raw rewards using the reward function
     raw_rewards_list = []
     for response, ground_truth in zip(rollout_responses, repeated_ground_truths):
@@ -163,34 +164,34 @@ def compute_group_normalized_rewards(
         # Get 'reward' key from dict
         reward_val = result.get("reward", 0.0)
         raw_rewards_list.append(reward_val)
-    
+
     raw_rewards = torch.tensor(raw_rewards_list, dtype=torch.float32)
-    
+
     # Group-normalize: for each group, subtract mean and optionally divide by std
     normalized_rewards = torch.zeros_like(raw_rewards)
-    
+
     for group_idx in range(n_groups):
         start_idx = group_idx * group_size
         end_idx = start_idx + group_size
-        
+
         group_rewards = raw_rewards[start_idx:end_idx]
         group_mean = group_rewards.mean()
-        
+
         if normalize_by_std:
             group_std = group_rewards.std(unbiased=True) + advantage_eps
             normalized = (group_rewards - group_mean) / group_std
         else:
             normalized = group_rewards - group_mean
-        
+
         normalized_rewards[start_idx:end_idx] = normalized
-    
+
     metadata = {
         "mean_raw_reward": raw_rewards.mean().item(),
         "std_raw_reward": raw_rewards.std().item(),
         "min_raw_reward": raw_rewards.min().item(),
         "max_raw_reward": raw_rewards.max().item(),
     }
-    
+
     return normalized_rewards, raw_rewards, metadata
 
 
@@ -199,11 +200,11 @@ def compute_naive_policy_gradient_loss(
     policy_log_probs: torch.Tensor,
 ) -> torch.Tensor:
     """Compute naive policy gradient loss: -advantages * log_probs.
-    
+
     Args:
         raw_rewards_or_advantages: (batch_size, 1) tensor
         policy_log_probs: (batch_size, sequence_length) tensor
-    
+
     Returns:
         (batch_size, sequence_length) per-token loss
     """
@@ -222,13 +223,13 @@ def compute_grpo_clip_loss(
     cliprange: float,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Compute GRPO-Clip loss with PPO-style clipping.
-    
+
     Args:
         advantages: (batch_size, 1) tensor
         policy_log_probs: (batch_size, sequence_length) tensor
         old_log_probs: (batch_size, sequence_length) tensor
         cliprange: float, clipping range
-    
+
     Returns:
         tuple[torch.Tensor, dict]:
             - loss: (batch_size, sequence_length) per-token loss
@@ -237,29 +238,29 @@ def compute_grpo_clip_loss(
     # Compute probability ratio: r = exp(log_p_new - log_p_old)
     log_ratio = policy_log_probs - old_log_probs
     ratio = torch.exp(log_ratio)
-    
+
     # Clip ratio to [1-cliprange, 1+cliprange]
     clipped_ratio = torch.clamp(ratio, 1 - cliprange, 1 + cliprange)
-    
+
     # Compute surrogate losses
     # surr1 = ratio * advantages
     # surr2 = clipped_ratio * advantages
     # loss = -min(surr1, surr2) for advantage maximization
-    
+
     surr1 = ratio * advantages
     surr2 = clipped_ratio * advantages
     loss = -torch.min(surr1, surr2)
-    
+
     # Compute clipping fraction for logging
     is_clipped = (ratio < (1 - cliprange)) | (ratio > (1 + cliprange))
     clip_fraction = is_clipped.float().mean()
-    
+
     metadata = {
         "clip_fraction": clip_fraction,
         "ratio_mean": ratio.mean(),
         "ratio_std": ratio.std(),
     }
-    
+
     return loss, metadata
 
 
@@ -272,7 +273,7 @@ def compute_policy_gradient_loss(
     cliprange: float,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Wrapper that delegates to appropriate PG loss function.
-    
+
     Args:
         policy_log_probs: (batch_size, sequence_length)
         loss_type: one of "no_baseline", "reinforce_with_baseline", "grpo_clip"
@@ -280,7 +281,7 @@ def compute_policy_gradient_loss(
         advantages: (batch_size, 1)
         old_log_probs: (batch_size, sequence_length)
         cliprange: float
-    
+
     Returns:
         tuple[torch.Tensor, dict]: (per-token loss, metadata)
     """
@@ -291,26 +292,28 @@ def compute_policy_gradient_loss(
         loss = compute_naive_policy_gradient_loss(advantages, policy_log_probs)
         metadata = {}
     elif loss_type == "grpo_clip":
-        loss, metadata = compute_grpo_clip_loss(advantages, policy_log_probs, old_log_probs, cliprange)
+        loss, metadata = compute_grpo_clip_loss(
+            advantages, policy_log_probs, old_log_probs, cliprange
+        )
     else:
         raise ValueError(f"Unknown loss_type: {loss_type}")
-    
+
     return loss, metadata
 
 
 def masked_mean(tensor: torch.Tensor, mask: torch.Tensor, dim: int | None = None) -> torch.Tensor:
     """Compute masked mean of tensor along a dimension.
-    
+
     Args:
         tensor: torch.Tensor
         mask: torch.Tensor (same shape as tensor, with 0s and 1s)
         dim: int | None, dimension to reduce. If None, computes global mean.
-    
+
     Returns:
         torch.Tensor, the masked mean (0 where mask is all zeros)
     """
     masked = tensor * mask
-    
+
     if dim is None:
         # Global mean
         masked_sum = masked.sum()
@@ -322,7 +325,7 @@ def masked_mean(tensor: torch.Tensor, mask: torch.Tensor, dim: int | None = None
         mask_count = mask.sum(dim=dim, keepdim=True).float()
         result = masked_sum / mask_count
         result = result.squeeze(dim)
-    
+
     return result
 
 
@@ -376,14 +379,19 @@ def grpo_microbatch_train_step(
         ratio = torch.exp(log_ratio)
         is_clipped = (ratio < (1 - cliprange)) | (ratio > (1 + cliprange))
         n_response_tokens = response_mask_float.sum().clamp(min=1)
-        metadata["clip_fraction"] = (is_clipped.float() * response_mask_float).sum() / n_response_tokens
+        metadata["clip_fraction"] = (
+            is_clipped.float() * response_mask_float
+        ).sum() / n_response_tokens
 
     if use_length_normalize:
         # Sum per sequence, divide by max_gen_len, then mean over batch.
         # Equivalent to masked_normalize(loss, mask, normalize_constant=max_gen_len, dim=1).mean()
-        assert max_gen_len is not None and max_gen_len > 0, \
-            "max_gen_len must be provided and > 0 when use_length_normalize=True"
-        final_loss = masked_normalize(loss, response_mask_float, normalize_constant=max_gen_len, dim=1).mean()
+        assert (
+            max_gen_len is not None and max_gen_len > 0
+        ), "max_gen_len must be provided and > 0 when use_length_normalize=True"
+        final_loss = masked_normalize(
+            loss, response_mask_float, normalize_constant=max_gen_len, dim=1
+        ).mean()
     else:
         # masked_mean per sequence (dim=1), then mean over batch
         final_loss = masked_mean(loss, response_mask_float, dim=1).mean()

@@ -6,6 +6,7 @@ Loads the model once and runs multiple training configurations with different da
 
 import argparse
 from datetime import datetime
+
 from .sft_trainer import train_sft
 
 
@@ -28,7 +29,7 @@ def run_sweep(
     """
     Run a sweep of hyperparameters.
     Model is kept in memory across runs - only dataset and config change.
-    
+
     Args:
         data_sizes: List of max_train_samples values (None = full dataset)
         batch_sizes: List of batch sizes to try
@@ -41,25 +42,27 @@ def run_sweep(
         batch_sizes = [8, 16]
     if learning_rates is None:
         learning_rates = [1e-4, 5e-5]
-    
+
     total_runs = len(data_sizes) * len(batch_sizes) * len(learning_rates)
     print(f"\n{'='*80}")
-    print(f"Starting SFT Sweep: {len(data_sizes)} sizes × {len(batch_sizes)} batches × {len(learning_rates)} LRs = {total_runs} runs")
+    print(
+        f"Starting SFT Sweep: {len(data_sizes)} sizes × {len(batch_sizes)} batches × {len(learning_rates)} LRs = {total_runs} runs"
+    )
     print(f"{'='*80}\n")
-    
+
     completed = 0
     failed = 0
-    
+
     for data_size in data_sizes:
         for batch_size in batch_sizes:
             for lr in learning_rates:
                 size_tag = data_size if data_size else "full"
                 run_name = f"sft_{size_tag}_bs{batch_size}_lr{lr}"
-                
+
                 completed += 1
                 print(f"\n[{completed}/{total_runs}] Running: {run_name}")
                 print(f"{'─'*80}")
-                
+
                 try:
                     train_sft(
                         model_id=model_id,
@@ -83,7 +86,7 @@ def run_sweep(
                     failed += 1
                     print(f"❌ Failed: {run_name}")
                     print(f"Error: {str(e)[:200]}")
-    
+
     print(f"\n{'='*80}")
     print(f"Sweep Complete: {completed - failed}/{total_runs} successful, {failed} failed")
     print(f"{'='*80}\n")
@@ -102,7 +105,7 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--eval_device", type=str, default="cuda:1")
     parser.add_argument("--use_wandb", action="store_true")
-    
+
     # Sweep parameters
     parser.add_argument("--data_sizes", type=int, nargs="+", default=[128, 256, 512, 1024])
     parser.add_argument("--batch_sizes", type=int, nargs="+", default=[8, 16])

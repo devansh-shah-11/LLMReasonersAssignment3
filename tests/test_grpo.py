@@ -1,13 +1,11 @@
 import torch
 
-from .adapters import (
-    run_compute_group_normalized_rewards as compute_group_normalized_rewards,
-    run_compute_grpo_clip_loss as compute_grpo_clip_loss,
-    run_compute_naive_policy_gradient_loss as compute_naive_policy_gradient_loss,
-    run_compute_policy_gradient_loss as compute_policy_gradient_loss,
-    run_grpo_microbatch_train_step as grpo_microbatch_train_step,
-    run_masked_mean as masked_mean,
-)
+from .adapters import run_compute_group_normalized_rewards as compute_group_normalized_rewards
+from .adapters import run_compute_grpo_clip_loss as compute_grpo_clip_loss
+from .adapters import run_compute_naive_policy_gradient_loss as compute_naive_policy_gradient_loss
+from .adapters import run_compute_policy_gradient_loss as compute_policy_gradient_loss
+from .adapters import run_grpo_microbatch_train_step as grpo_microbatch_train_step
+from .adapters import run_masked_mean as masked_mean
 
 
 def test_compute_group_normalized_rewards_normalize_by_std(
@@ -54,8 +52,6 @@ def test_compute_group_normalized_rewards_no_normalize_by_std(
         "raw_rewards": raw_rewards,
     }
     numpy_snapshot.assert_match(output)
-
-
 
 
 def test_compute_naive_policy_gradient_loss(
