@@ -32,7 +32,9 @@ def tokenize_prompt_and_output(
         if len(full_ids) > max_full_len:
             max_full_len = len(full_ids)
 
-    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+    pad_id = (
+        tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+    )
 
     # Pad full_ids
     padded = torch.full((batch_size, max_full_len), pad_id, dtype=torch.long)
