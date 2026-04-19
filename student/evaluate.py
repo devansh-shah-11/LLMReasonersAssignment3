@@ -32,9 +32,14 @@ def load_prompt(name: str = "intellect") -> str:
 def load_model_vllm(model_id: str, gpu_memory_utilization: float = 0.85):
     import os
 
-    # vLLM's HF validator rejects absolute paths; resolve to a relative path if local
-    if os.path.isabs(model_id) and os.path.isdir(model_id):
-        model_id = os.path.relpath(model_id)
+    # vLLM calls HF's validate_repo_id which rejects paths with multiple slashes.
+    # A no-slash symlink in CWD passes validation and vLLM follows it to the real dir.
+    if os.path.isdir(model_id):
+        link = "_local_model"
+        if os.path.islink(link):
+            os.remove(link)
+        os.symlink(os.path.abspath(model_id), link)
+        model_id = link
     return LLM(
         model=model_id,
         tokenizer=model_id,
