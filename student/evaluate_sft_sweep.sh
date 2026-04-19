@@ -8,22 +8,6 @@
 #SBATCH --gres=gpu:a100:1
 #SBATCH --requeue
 
-MODELS=(
-    sft_full_bs2_lr3e-5
-    sft_full_bs2_lr1e-5
-    sft_1024_bs2_lr3e-5
-    sft_1024_bs2_lr1e-5
-    sft_512_bs2_lr3e-5
-    sft_512_bs2_lr1e-5
-    sft_256_bs2_lr3e-5
-    sft_256_bs2_lr1e-5
-    sft_128_bs2_lr3e-5
-    sft_128_bs2_lr1e-5
-)
-
-MODEL_BASE=/scratch/dns5508/model_V2
-RESULTS_FILE=student/sft_sweep_math_results.txt
-
 mkdir -p ./logs
 
 singularity exec --bind /scratch --nv \
@@ -49,21 +33,23 @@ MODELS=(
 )
 
 MODEL_BASE=/scratch/dns5508/model_V2
-RESULTS_FILE=student/sft_sweep_math_results.txt
+CSV=student/sft_sweep_math_results.csv
 
-echo 'SFT Sweep — MATH Evaluation' > \"\$RESULTS_FILE\"
-echo '==============================' >> \"\$RESULTS_FILE\"
-echo \"Date: \$(date)\" >> \"\$RESULTS_FILE\"
+# Write header only if file doesn't exist yet
+if [ ! -f \"\$CSV\" ]; then
+    echo 'model_id,correct_format_answer,correct_format_wrong_answer,neither_correct,math_accuracy' > \"\$CSV\"
+fi
 
 for MODEL in \"\${MODELS[@]}\"; do
-    MODEL_PATH=\"\${MODEL_BASE}/\${MODEL}\"
+    MODEL_PATH=\"\${MODEL_BASE}/\${MODEL}/best\"
 
-    echo '' | tee -a \"\$RESULTS_FILE\"
-    echo '========================================' | tee -a \"\$RESULTS_FILE\"
-    echo \"Model: \$MODEL\" | tee -a \"\$RESULTS_FILE\"
+    echo ''
+    echo '========================================'
+    echo \"Model: \$MODEL\"
 
     if [ ! -d \"\$MODEL_PATH\" ]; then
-        echo '[SKIP] directory not found' | tee -a \"\$RESULTS_FILE\"
+        echo '[SKIP] directory not found'
+        echo \"\${MODEL},SKIP,SKIP,SKIP,SKIP\" >> \"\$CSV\"
         continue
     fi
 
@@ -75,10 +61,15 @@ for MODEL in \"\${MODELS[@]}\"; do
 
     echo \"\$OUTPUT\"
 
-    MATH_ACC=\$(echo \"\$OUTPUT\" | grep 'MATH Accuracy:' | awk '{print \$NF}')
-    echo \"MATH Accuracy: \$MATH_ACC\" | tee -a \"\$RESULTS_FILE\"
+    CFA=\$(echo \"\$OUTPUT\"  | grep 'Correct answer and format:'        | awk '{print \$NF}')
+    CFW=\$(echo \"\$OUTPUT\"  | grep 'Correct format but wrong answer:'  | awk '{print \$NF}')
+    NCA=\$(echo \"\$OUTPUT\"  | grep 'Neither format nor answer correct:' | awk '{print \$NF}')
+    ACC=\$(echo \"\$OUTPUT\"  | grep 'MATH Accuracy:'                    | awk '{print \$NF}')
+
+    echo \"\${MODEL},\${CFA},\${CFW},\${NCA},\${ACC}\" >> \"\$CSV\"
+    echo \">>> Appended to \$CSV\"
 done
 
-echo '' | tee -a \"\$RESULTS_FILE\"
-echo 'Sweep complete.' | tee -a \"\$RESULTS_FILE\"
+echo ''
+echo 'Sweep complete. Results in' \"\$CSV\"
 "
