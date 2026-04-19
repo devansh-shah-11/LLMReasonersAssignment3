@@ -30,8 +30,14 @@ def load_prompt(name: str = "intellect") -> str:
 
 
 def load_model_vllm(model_id: str, gpu_memory_utilization: float = 0.85):
+    import os
+
+    # vLLM's HF validator rejects absolute paths; resolve to a relative path if local
+    if os.path.isabs(model_id) and os.path.isdir(model_id):
+        model_id = os.path.relpath(model_id)
     return LLM(
         model=model_id,
+        tokenizer=model_id,
         trust_remote_code=True,
         gpu_memory_utilization=gpu_memory_utilization,
     )
