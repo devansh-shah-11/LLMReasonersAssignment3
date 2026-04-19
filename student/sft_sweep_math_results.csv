@@ -1,0 +1,11 @@
+model_id,correct_format_answer,correct_format_wrong_answer,neither_correct,math_accuracy
+sft_full_bs2_lr3e-5,343,83,74,0.6860
+sft_full_bs2_lr1e-5,335,109,56,0.6700
+sft_1024_bs2_lr3e-5,329,89,82,0.6580
+sft_1024_bs2_lr1e-5,345,114,41,0.6900
+sft_512_bs2_lr3e-5,320,91,89,0.6400
+sft_512_bs2_lr1e-5,317,157,26,0.6340
+sft_256_bs2_lr3e-5,342,82,76,0.6840
+sft_256_bs2_lr1e-5,330,145,25,0.6600
+sft_128_bs2_lr3e-5,320,114,66,0.6400
+sft_128_bs2_lr1e-5,302,163,35,0.6040
